@@ -1,7 +1,7 @@
 ---
 name: word-strip-chinese
 description: Strip Chinese from bilingual Word .docx files.
-version: 1.1.0
+version: 1.2.0
 author: eprince999, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -16,7 +16,7 @@ metadata:
 
 Remove Chinese characters from a bilingual (Chinese + English) Word document and keep the English. This skill does **not** translate; it deletes Han ideographs (and, by default, leftover CJK punctuation such as `。` `，` `、`) while leaving Latin letters, digits, and Western punctuation intact.
 
-Japanese kana and Korean hangul are not removed. After Han is deleted, **blank paragraphs left by Chinese-only lines are removed by default** so English lines sit next to each other.
+Japanese kana and Korean hangul are not removed. After Han is deleted, leftover **blank lines, punctuation-only lines** (a lone `?`, dashes), and **single-word lines** (one English name) are removed by default. A line is kept only if it has at least two English words.
 
 ## When to Use
 
@@ -65,7 +65,8 @@ Default output is `input.en.docx` next to the **document**, not next to the scri
 | Overwrite | `... strip_chinese.py /full/path/file.docx --in-place` |
 | Count only | `... strip_chinese.py /full/path/file.docx --dry-run` |
 | Keep `。，、`, delete Han only | `... strip_chinese.py /full/path/file.docx --keep-punctuation` |
-| Keep blank lines from deleted Chinese | `... strip_chinese.py /full/path/file.docx --keep-empty-lines` |
+| Keep blank / `?` / single-name lines | `... --keep-empty-lines` |
+| Keep single names, drop `?` only | `... --min-english-words 1` |
 | Word Find `[一-龥]` reports 0 | Expected — use VBA or this script, not wildcards |
 | Run inside Word | Alt+F11 → import `scripts/RemoveChinese.bas` → F5 |
 
@@ -100,7 +101,8 @@ The character-by-character `Characters(i).Delete` loop is too slow on long docs.
 - **Word Find `[一-龥]` → 0 hits is expected** on English-UI Word. The wildcard engine does not honor a Unicode Han range. Use VBA (`RemoveChinese.bas`) or `strip_chinese.py`.
 - **Not a translator.** "Hello 世界" becomes "Hello", not "Hello world".
 - **Fullwidth ASCII is converted**, not deleted: `Ｈｅｌｌｏ，世界` → `Hello,`.
-- **Empty paragraphs** left by Chinese-only lines are **removed by default**. Pass `--keep-empty-lines` to keep them.
+- **Weak leftover lines** (`?`, symbols, a single name) are **removed by default**. A line needs two or more English words to survive. Use `--min-english-words 1` to keep single names, or `--keep-empty-lines` to keep everything.
+- **Empty paragraphs** left by Chinese-only lines are **removed by default** (same filter).
 - **Headers, footers, comments, footnotes** are cleaned (every XML part in the .docx zip). Images are copied unchanged.
 - **`--no-collapse`** keeps double spaces left behind by deletions. Default collapse only happens inside Word text runs (`<w:t>`), not in XML indentation.
 

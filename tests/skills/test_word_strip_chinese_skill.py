@@ -232,7 +232,7 @@ def test_docx_header_is_cleaned(tmp_path: Path):
     src = make_docx(
         tmp_path / "headed.docx",
         "Body English",
-        header_text="机密 Confidential",
+        header_text="机密 Confidential Notice",
     )
     dest = tmp_path / "headed.en.docx"
     result = mod.process_docx(
@@ -281,14 +281,14 @@ def test_legacy_doc_rejected(tmp_path: Path):
 
 def test_cli_writes_default_en_suffix(tmp_path: Path, capsys):
     mod = load_module()
-    src = make_docx(tmp_path / "report.docx", "Title 标题")
+    src = make_docx(tmp_path / "report.docx", "Report Title 标题")
     code = mod.main([str(src)])
     assert code == 0
     payload = json.loads(capsys.readouterr().out)
     out = Path(payload["output"])
     assert out.name == "report.en.docx"
     assert out.exists()
-    assert "Title" in read_docx_xml(out)
+    assert "Report Title" in read_docx_xml(out)
     assert "标" not in read_docx_xml(out)
     # Original preserved.
     assert "标" in read_docx_xml(src)
@@ -309,7 +309,7 @@ def test_collapse_blank_lines():
 
 def test_docx_removes_empty_paragraphs_left_by_chinese(tmp_path: Path):
     mod = load_module()
-    src = make_docx(tmp_path / "lines.docx", ["Hello", "中文段落", "World"])
+    src = make_docx(tmp_path / "lines.docx", ["Hello there", "中文段落", "World peace"])
     dest = tmp_path / "lines.en.docx"
     result = mod.process_docx(
         src,
@@ -321,11 +321,10 @@ def test_docx_removes_empty_paragraphs_left_by_chinese(tmp_path: Path):
     xml = read_docx_xml(dest)
     assert result["empty_paragraphs_removed"] == 1
     assert xml.count("<w:p>") == 2
-    assert "Hello" in xml
-    assert "World" in xml
+    assert "Hello there" in xml
+    assert "World peace" in xml
     assert "中" not in xml
-    # No blank paragraph remaining between the two English lines.
-    assert ">Hello</w:t></w:r></w:p><w:p><w:r>" in xml or xml.index("Hello") < xml.index("World")
+    assert xml.index("Hello there") < xml.index("World peace")
     empty_paras = re.findall(
         r"<w:p><w:r><w:t xml:space=\"preserve\"></w:t></w:r></w:p>", xml
     )
@@ -334,7 +333,7 @@ def test_docx_removes_empty_paragraphs_left_by_chinese(tmp_path: Path):
 
 def test_keep_empty_lines_preserves_blank_paragraph(tmp_path: Path):
     mod = load_module()
-    src = make_docx(tmp_path / "keep.docx", ["Hello", "中文", "World"])
+    src = make_docx(tmp_path / "keep.docx", ["Hello there", "中文", "World peace"])
     dest = tmp_path / "keep.en.docx"
     result = mod.process_docx(
         src,
@@ -352,7 +351,7 @@ def test_keep_empty_lines_preserves_blank_paragraph(tmp_path: Path):
 def test_already_stripped_file_drops_blank_lines(tmp_path: Path):
     """Re-run on a file that already lost its Chinese but kept empty paras."""
     mod = load_module()
-    src = make_docx(tmp_path / "blank.docx", ["Hello", "", "World"])
+    src = make_docx(tmp_path / "blank.docx", ["Hello there", "", "World peace"])
     dest = tmp_path / "blank.en.docx"
     result = mod.process_docx(
         src,
@@ -364,8 +363,8 @@ def test_already_stripped_file_drops_blank_lines(tmp_path: Path):
     xml = read_docx_xml(dest)
     assert result["empty_paragraphs_removed"] == 1
     assert xml.count("<w:p>") == 2
-    assert "Hello" in xml
-    assert "World" in xml
+    assert "Hello there" in xml
+    assert "World peace" in xml
 
 
 def test_table_cell_keeps_placeholder_paragraph(tmp_path: Path):
@@ -377,7 +376,7 @@ def test_table_cell_keeps_placeholder_paragraph(tmp_path: Path):
         "<w:tbl><w:tr><w:tc>"
         "<w:p><w:r><w:t>中文</w:t></w:r></w:p>"
         "</w:tc></w:tr></w:tbl>"
-        "<w:p><w:r><w:t>After</w:t></w:r></w:p>"
+        "<w:p><w:r><w:t>After table</w:t></w:r></w:p>"
         "</w:body></w:document>"
     )
     src = tmp_path / "table.docx"
@@ -396,5 +395,54 @@ def test_table_cell_keeps_placeholder_paragraph(tmp_path: Path):
     xml = read_docx_xml(dest)
     assert "<w:tc>" in xml
     assert "<w:p>" in xml.split("<w:tc>", 1)[1].split("</w:tc>", 1)[0]
-    assert "After" in xml
+    assert "After table" in xml
     assert "中" not in xml
+
+
+def test_english_word_count():
+    mod = load_module()
+    assert mod.english_word_count("?") == 0
+    assert mod.english_word_count("?? — ...") == 0
+    assert mod.english_word_count("Allen") == 1
+    assert mod.english_word_count("Hello world") == 2
+    assert mod.english_word_count("don't stop") == 2
+
+
+def test_drops_punctuation_only_and_single_name_lines(tmp_path: Path):
+    mod = load_module()
+    src = make_docx(
+        tmp_path / "weak.docx",
+        ["?", "Allen", "---", "Hello world", "OK"],
+    )
+    dest = tmp_path / "weak.en.docx"
+    result = mod.process_docx(
+        src,
+        dest,
+        keep_punctuation=False,
+        collapse_spaces=True,
+        dry_run=False,
+    )
+    xml = read_docx_xml(dest)
+    assert result["empty_paragraphs_removed"] == 4
+    assert xml.count("<w:p>") == 1
+    assert "Hello world" in xml
+    assert "Allen" not in xml
+    assert "OK" not in xml
+
+
+def test_min_english_words_one_keeps_single_name(tmp_path: Path):
+    mod = load_module()
+    src = make_docx(tmp_path / "names.docx", ["?", "Allen", "Hello world"])
+    dest = tmp_path / "names.en.docx"
+    result = mod.process_docx(
+        src,
+        dest,
+        keep_punctuation=False,
+        collapse_spaces=True,
+        dry_run=False,
+        min_english_words=1,
+    )
+    xml = read_docx_xml(dest)
+    assert "Allen" in xml
+    assert "Hello world" in xml
+    assert result["empty_paragraphs_removed"] == 1

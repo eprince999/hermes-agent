@@ -72,6 +72,8 @@ _KEEP_PARA_RE = re.compile(
     r"|w:type=['\"]page['\"]"
     r"|type=['\"]page['\"]"
 )
+# Latin words, including contractions (don't). Hyphenated names count as two.
+_EN_WORD_RE = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)*")
 
 
 def _codepoint_is_han(cp: int) -> bool:
@@ -140,6 +142,22 @@ def paragraph_is_visually_blank(p_xml: str) -> bool:
     return visible.strip() == ""
 
 
+def english_word_count(text: str) -> int:
+    """Count Latin-letter words in visible text (not digits or punctuation)."""
+    return len(_EN_WORD_RE.findall(text))
+
+
+def paragraph_visible_text(p_xml: str) -> str:
+    return "".join(m.group(2) for m in _XML_T_RE.finditer(p_xml))
+
+
+def paragraph_should_drop(p_xml: str, *, min_english_words: int) -> bool:
+    """Drop blank lines, punctuation-only lines, and single-name leftovers."""
+    if _KEEP_PARA_RE.search(p_xml):
+        return False
+    return english_word_count(paragraph_visible_text(p_xml)) < min_english_words
+
+
 def _table_spans(xml: str) -> list[tuple[int, int]]:
     """Byte offsets of ``w:tbl`` blocks, including nested tables."""
     open_pat = re.compile(r"<(?:[\w.-]+:)?tbl\b[^>]*?(/>|>)")
@@ -177,12 +195,17 @@ def _in_spans(index: int, spans: list[tuple[int, int]]) -> bool:
     return any(start <= index < end for start, end in spans)
 
 
-def remove_empty_paragraphs(xml: str) -> tuple[str, int]:
-    """Delete blank ``w:p`` lines left after Chinese-only paragraphs are stripped.
+def remove_empty_paragraphs(
+    xml: str, *, min_english_words: int = 2
+) -> tuple[str, int]:
+    """Delete leftover ``w:p`` lines that are not real English sentences.
 
-    Paragraphs inside tables are kept: a cell must contain at least one ``w:p``.
+    Drops blank lines, punctuation-only lines (``?``, ``---``), and lines
+    with fewer than ``min_english_words`` Latin words (default: 2, so a
+    lone name like ``Allen`` is removed). Table cells keep a placeholder
+    paragraph.
     """
-    if "<" not in xml:
+    if "<" not in xml or min_english_words <= 0:
         return xml, 0
     protected = _table_spans(xml)
     chunks: list[str] = []
@@ -191,7 +214,7 @@ def remove_empty_paragraphs(xml: str) -> tuple[str, int]:
     for match in _W_P_RE.finditer(xml):
         if _in_spans(match.start(), protected):
             continue
-        if not paragraph_is_visually_blank(match.group(0)):
+        if not paragraph_should_drop(match.group(0), min_english_words=min_english_words):
             continue
         chunks.append(xml[last:match.start()])
         last = match.end()
@@ -200,6 +223,21 @@ def remove_empty_paragraphs(xml: str) -> tuple[str, int]:
         return xml, 0
     chunks.append(xml[last:])
     return "".join(chunks), removed
+
+
+def filter_text_lines(text: str, *, min_english_words: int) -> tuple[str, int]:
+    """Drop text lines with fewer than ``min_english_words`` Latin words."""
+    if min_english_words <= 0:
+        return text, 0
+    kept: list[str] = []
+    dropped = 0
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        if english_word_count(body) >= min_english_words:
+            kept.append(line)
+        else:
+            dropped += 1
+    return "".join(kept), dropped
 
 
 def _sub_count_chars(pattern: re.Pattern[str], text: str) -> tuple[str, int]:
@@ -250,6 +288,7 @@ def process_text_file(
     collapse_spaces: bool,
     dry_run: bool,
     remove_empty_lines: bool = True,
+    min_english_words: int = 2,
 ) -> dict:
     original = source.read_text(encoding="utf-8")
     cleaned, removed = strip_chinese(
@@ -262,6 +301,8 @@ def process_text_file(
         collapsed = collapse_blank_lines(cleaned)
         empty_removed = cleaned.count("\n") - collapsed.count("\n")
         cleaned = collapsed
+        cleaned, weak_n = filter_text_lines(cleaned, min_english_words=min_english_words)
+        empty_removed += weak_n
     dest = dest or default_output_path(source)
     changed = cleaned != original
     if not dry_run:
@@ -285,6 +326,7 @@ def _rewrite_docx_part(
     keep_punctuation: bool,
     collapse_spaces: bool,
     remove_empty_lines: bool,
+    min_english_words: int,
 ) -> tuple[bytes, int, bool, int]:
     if not filename.lower().endswith(_XML_PART_SUFFIXES):
         return data, 0, False, 0
@@ -301,7 +343,9 @@ def _rewrite_docx_part(
         cleaned = collapse_xml_text_node_spaces(cleaned)
     empty_removed = 0
     if remove_empty_lines and filename.lower().endswith(".xml"):
-        cleaned, empty_removed = remove_empty_paragraphs(cleaned)
+        cleaned, empty_removed = remove_empty_paragraphs(
+            cleaned, min_english_words=min_english_words
+        )
     if cleaned == text:
         return data, 0, False, 0
     return cleaned.encode("utf-8"), removed, True, empty_removed
@@ -315,6 +359,7 @@ def process_docx(
     collapse_spaces: bool,
     dry_run: bool,
     remove_empty_lines: bool = True,
+    min_english_words: int = 2,
 ) -> dict:
     if not zipfile.is_zipfile(source):
         raise ValueError(f"Not a valid .docx (zip) file: {source}")
@@ -334,6 +379,7 @@ def process_docx(
                 keep_punctuation=keep_punctuation,
                 collapse_spaces=collapse_spaces,
                 remove_empty_lines=remove_empty_lines,
+                min_english_words=min_english_words,
             )
             if changed:
                 files_changed += 1
@@ -374,6 +420,7 @@ def process_path(
     collapse_spaces: bool,
     dry_run: bool,
     remove_empty_lines: bool = True,
+    min_english_words: int = 2,
 ) -> dict:
     suffix = source.suffix.lower()
     if suffix == ".doc":
@@ -388,6 +435,7 @@ def process_path(
             collapse_spaces=collapse_spaces,
             dry_run=dry_run,
             remove_empty_lines=remove_empty_lines,
+            min_english_words=min_english_words,
         )
     if suffix in _TEXT_EXTENSIONS or suffix == "":
         return process_text_file(
@@ -397,6 +445,7 @@ def process_path(
             collapse_spaces=collapse_spaces,
             dry_run=dry_run,
             remove_empty_lines=remove_empty_lines,
+            min_english_words=min_english_words,
         )
     raise ValueError(f"Unsupported file type: {suffix or source.name}")
 
@@ -430,7 +479,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--keep-empty-lines",
         action="store_true",
-        help="Keep blank paragraphs left behind after Chinese-only lines are deleted",
+        help="Keep blank/punctuation-only/single-word lines after Chinese is deleted",
+    )
+    parser.add_argument(
+        "--min-english-words",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Drop lines with fewer than N English words (default: 2)",
     )
     parser.add_argument(
         "--dry-run",
@@ -449,6 +505,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if args.in_place and args.output:
         print("Use either --in-place or -o, not both.", file=sys.stderr)
+        return 1
+    min_words = args.min_english_words
+    if min_words is None:
+        min_words = 0 if args.keep_empty_lines else 2
+    if min_words < 0:
+        print("--min-english-words must be >= 0", file=sys.stderr)
         return 1
     if args.output and len(sources) > 1 and not args.output.is_dir():
         args.output.mkdir(parents=True, exist_ok=True)
@@ -472,6 +534,7 @@ def main(argv: list[str] | None = None) -> int:
                     collapse_spaces=not args.no_collapse,
                     dry_run=args.dry_run,
                     remove_empty_lines=not args.keep_empty_lines,
+                    min_english_words=min_words,
                 )
             )
     except ValueError as exc:
