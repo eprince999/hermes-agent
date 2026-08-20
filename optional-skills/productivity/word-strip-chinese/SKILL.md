@@ -1,7 +1,7 @@
 ---
 name: word-strip-chinese
 description: Strip Chinese from bilingual Word .docx files.
-version: 1.0.1
+version: 1.0.2
 author: eprince999, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -33,27 +33,38 @@ Do **not** use this when the user wants a translation, a summary, or to keep som
 
 ## How to Run
 
-Resolve `scripts/strip_chinese.py` to this skill's absolute path. Run it with the `terminal` tool.
+The script lives **inside this skill directory**, not under `~/optional-skills/`. If `python3` reports `No such file or directory`, the path is wrong — `$HOME/optional-skills/...` does not exist unless the repo was cloned there.
+
+Resolve the script in this order:
+
+1. **This checkout** (repo root = the directory that contains `optional-skills/`):
+   `optional-skills/productivity/word-strip-chinese/scripts/strip_chinese.py`
+2. **After** `hermes skills install official/productivity/word-strip-chinese`:
+   `~/.hermes/skills/productivity/word-strip-chinese/scripts/strip_chinese.py`
+3. Copy `scripts/strip_chinese.py` anywhere (Desktop is fine) and pass that path to `python3`.
+
+`input.docx` must be the user's document (often on Desktop or Downloads), not a path next to the script.
 
 ```bash
-python3 scripts/strip_chinese.py input.docx
-python3 scripts/strip_chinese.py input.docx -o cleaned.docx
-python3 scripts/strip_chinese.py input.docx --in-place
-python3 scripts/strip_chinese.py input.docx --dry-run
-python3 scripts/strip_chinese.py notes.txt
+# From the hermes-agent repo root
+python3 optional-skills/productivity/word-strip-chinese/scripts/strip_chinese.py "/full/path/to/input.docx"
+
+python3 optional-skills/productivity/word-strip-chinese/scripts/strip_chinese.py "/full/path/to/input.docx" -o cleaned.docx
+python3 optional-skills/productivity/word-strip-chinese/scripts/strip_chinese.py "/full/path/to/input.docx" --in-place
+python3 optional-skills/productivity/word-strip-chinese/scripts/strip_chinese.py "/full/path/to/input.docx" --dry-run
 ```
 
-Default output is `input.en.docx` next to the source (original is not overwritten). The script prints JSON: `chars_removed`, `files_changed`, `output`.
+Default output is `input.en.docx` next to the **document**, not next to the script. The script prints JSON: `chars_removed`, `files_changed`, `output`.
 
 ## Quick Reference
 
 | Goal | Command / action |
 |---|---|
-| Clean a .docx, keep original | `python3 scripts/strip_chinese.py file.docx` |
-| Choose output path | `python3 scripts/strip_chinese.py file.docx -o out.docx` |
-| Overwrite | `python3 scripts/strip_chinese.py file.docx --in-place` |
-| Count only | `python3 scripts/strip_chinese.py file.docx --dry-run` |
-| Keep `。，、`, delete Han only | `python3 scripts/strip_chinese.py file.docx --keep-punctuation` |
+| Clean a .docx, keep original | `python3 <skill>/scripts/strip_chinese.py /full/path/file.docx` |
+| Choose output path | `... strip_chinese.py /full/path/file.docx -o out.docx` |
+| Overwrite | `... strip_chinese.py /full/path/file.docx --in-place` |
+| Count only | `... strip_chinese.py /full/path/file.docx --dry-run` |
+| Keep `。，、`, delete Han only | `... strip_chinese.py /full/path/file.docx --keep-punctuation` |
 | Word Find `[一-龥]` reports 0 | Expected — use VBA or this script, not wildcards |
 | Run inside Word | Alt+F11 → import `scripts/RemoveChinese.bas` → F5 |
 
@@ -84,6 +95,7 @@ The character-by-character `Characters(i).Delete` loop is too slow on long docs.
 
 ## Pitfalls
 
+- **`python3: can't open file ... No such file`** means the script path is wrong. Do not invent `~/optional-skills/...`. Use the clone path, the installed skill path, or copy `scripts/strip_chinese.py` to `$HOME/strip_chinese.py`.
 - **Word Find `[一-龥]` → 0 hits is expected** on English-UI Word. The wildcard engine does not honor a Unicode Han range. Use VBA (`RemoveChinese.bas`) or `strip_chinese.py`.
 - **Not a translator.** "Hello 世界" becomes "Hello", not "Hello world".
 - **Fullwidth ASCII is converted**, not deleted: `Ｈｅｌｌｏ，世界` → `Hello,`.
