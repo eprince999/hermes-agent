@@ -1,7 +1,7 @@
 ---
 name: word-strip-chinese
 description: Strip Chinese from bilingual Word .docx files.
-version: 1.0.0
+version: 1.0.1
 author: eprince999, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -54,7 +54,8 @@ Default output is `input.en.docx` next to the source (original is not overwritte
 | Overwrite | `python3 scripts/strip_chinese.py file.docx --in-place` |
 | Count only | `python3 scripts/strip_chinese.py file.docx --dry-run` |
 | Keep `。，、`, delete Han only | `python3 scripts/strip_chinese.py file.docx --keep-punctuation` |
-| Word desktop Find & Replace | Ctrl+H → Use wildcards → find `[一-龥]` → replace empty |
+| Word Find `[一-龥]` reports 0 | Expected — use VBA or this script, not wildcards |
+| Run inside Word | Alt+F11 → import `scripts/RemoveChinese.bas` → F5 |
 
 ## Procedure
 
@@ -64,42 +65,26 @@ Default output is `input.en.docx` next to the source (original is not overwritte
 4. Spot-check with `read_file` on the output `.docx` (Hermes extracts Word text). Confirm English remains and Chinese is gone.
 5. Hand the output path back. Do not delete the original unless asked.
 
-### Microsoft Word (no script)
+### Microsoft Word Find reports 0 hits
 
-If the user wants to do it inside Word:
+**`[一-龥]` with Use wildcards is expected to find 0** on most Word builds, especially English-UI Word. The wildcard engine does not treat that as a Unicode Han range. This does not mean the document has no Chinese.
 
-1. Ctrl+H (Find and Replace).
-2. More → check **Use wildcards**.
-3. Find what: `[一-龥]`  (CJK Unified Ideographs).
-4. Replace with: leave empty → Replace All.
-5. Optionally replace leftover `。` `，` `、` `；` `：` `？` `！` `「` `」` `《` `》` one at a time (wildcards cannot list them all cleanly).
+Do **not** keep retrying Find & Replace wildcards. Use one of these:
 
-Word wildcards miss Extension-A/B ideographs; the helper script covers those.
+1. **Sanity check (wildcards OFF):** copy one visible 汉字 from the body, paste it into Find what, Replace All. If that finds hits, the text is real and the range wildcard is the problem.
+2. **If that also finds 0:** the glyphs are probably images, text boxes Word's Find skipped, or a locked content control — use the Python script (it reads OOXML) or the VBA below (it also walks headers and shapes).
+3. **VBA (inside Word):** `Alt+F11` → `File` → `Import File` → `scripts/RemoveChinese.bas` → click inside `RemoveChineseKeepEnglish` → `F5`. Or Insert → Module and paste the procedures from that file (skip the `Attribute VB_Name` line).
+4. **Python (keeps run formatting better):** `python3 scripts/strip_chinese.py file.docx`
+
+Do not check Match whole words / 全字匹配. Do not use wildcards for this job.
 
 ### VBA (Word desktop)
 
-```vb
-Sub RemoveChineseKeepEnglish()
-    Dim i As Long, ch As String, cp As Long
-    Dim rng As Range
-    Set rng = ActiveDocument.Content
-    For i = rng.Characters.Count To 1 Step -1
-        ch = rng.Characters(i).Text
-        If Len(ch) = 1 Then
-            cp = AscW(ch)
-            If cp < 0 Then cp = cp + 65536
-            If (cp >= &H4E00 And cp <= &H9FFF) Or (cp >= &H3400 And cp <= &H4DBF) Then
-                rng.Characters(i).Delete
-            End If
-        End If
-    Next i
-End Sub
-```
-
-Prefer the Python script for large files; this loop is slow.
+The character-by-character `Characters(i).Delete` loop is too slow on long docs. `scripts/RemoveChinese.bas` rewrites paragraph text instead and also covers headers, footers, text boxes, footnotes, and comments.
 
 ## Pitfalls
 
+- **Word Find `[一-龥]` → 0 hits is expected** on English-UI Word. The wildcard engine does not honor a Unicode Han range. Use VBA (`RemoveChinese.bas`) or `strip_chinese.py`.
 - **Not a translator.** "Hello 世界" becomes "Hello", not "Hello world".
 - **Fullwidth ASCII is converted**, not deleted: `Ｈｅｌｌｏ，世界` → `Hello,`.
 - **Empty paragraphs** remain if a paragraph was Chinese-only. That is intentional (layout stays).
