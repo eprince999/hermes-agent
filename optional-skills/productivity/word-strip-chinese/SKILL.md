@@ -1,7 +1,7 @@
 ---
 name: word-strip-chinese
 description: Strip Chinese from bilingual Word .docx files.
-version: 1.0.2
+version: 1.1.0
 author: eprince999, Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -16,7 +16,7 @@ metadata:
 
 Remove Chinese characters from a bilingual (Chinese + English) Word document and keep the English. This skill does **not** translate; it deletes Han ideographs (and, by default, leftover CJK punctuation such as `。` `，` `、`) while leaving Latin letters, digits, and Western punctuation intact.
 
-Japanese kana and Korean hangul are not removed.
+Japanese kana and Korean hangul are not removed. After Han is deleted, **blank paragraphs left by Chinese-only lines are removed by default** so English lines sit next to each other.
 
 ## When to Use
 
@@ -65,6 +65,7 @@ Default output is `input.en.docx` next to the **document**, not next to the scri
 | Overwrite | `... strip_chinese.py /full/path/file.docx --in-place` |
 | Count only | `... strip_chinese.py /full/path/file.docx --dry-run` |
 | Keep `。，、`, delete Han only | `... strip_chinese.py /full/path/file.docx --keep-punctuation` |
+| Keep blank lines from deleted Chinese | `... strip_chinese.py /full/path/file.docx --keep-empty-lines` |
 | Word Find `[一-龥]` reports 0 | Expected — use VBA or this script, not wildcards |
 | Run inside Word | Alt+F11 → import `scripts/RemoveChinese.bas` → F5 |
 
@@ -99,7 +100,7 @@ The character-by-character `Characters(i).Delete` loop is too slow on long docs.
 - **Word Find `[一-龥]` → 0 hits is expected** on English-UI Word. The wildcard engine does not honor a Unicode Han range. Use VBA (`RemoveChinese.bas`) or `strip_chinese.py`.
 - **Not a translator.** "Hello 世界" becomes "Hello", not "Hello world".
 - **Fullwidth ASCII is converted**, not deleted: `Ｈｅｌｌｏ，世界` → `Hello,`.
-- **Empty paragraphs** remain if a paragraph was Chinese-only. That is intentional (layout stays).
+- **Empty paragraphs** left by Chinese-only lines are **removed by default**. Pass `--keep-empty-lines` to keep them.
 - **Headers, footers, comments, footnotes** are cleaned (every XML part in the .docx zip). Images are copied unchanged.
 - **`--no-collapse`** keeps double spaces left behind by deletions. Default collapse only happens inside Word text runs (`<w:t>`), not in XML indentation.
 

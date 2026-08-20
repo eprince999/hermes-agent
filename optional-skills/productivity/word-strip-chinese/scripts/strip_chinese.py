@@ -63,6 +63,15 @@ _XML_T_RE = re.compile(
     r"(<(?:[\w.-]+:)?t\b[^>]*>)(.*?)(</(?:[\w.-]+:)?t>)",
     re.DOTALL,
 )
+_W_P_RE = re.compile(
+    r"<(?:[\w.-]+:)?p\b[^>]*/>|<(?:[\w.-]+:)?p\b[^>]*>.*?</(?:[\w.-]+:)?p\s*>",
+    re.DOTALL,
+)
+_KEEP_PARA_RE = re.compile(
+    r"<(?:[\w.-]+:)?(?:drawing|pict|object|tbl|sectPr)\b"
+    r"|w:type=['\"]page['\"]"
+    r"|type=['\"]page['\"]"
+)
 
 
 def _codepoint_is_han(cp: int) -> bool:
@@ -116,6 +125,83 @@ def collapse_xml_text_node_spaces(xml: str) -> str:
     return _XML_T_RE.sub(repl, xml)
 
 
+def collapse_blank_lines(text: str) -> str:
+    """Turn leftover empty lines (Chinese-only paragraphs) into a single newline."""
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{2,}", "\n", text)
+    return text
+
+
+def paragraph_is_visually_blank(p_xml: str) -> bool:
+    """True when a ``w:p`` would render as an empty line in Word."""
+    if _KEEP_PARA_RE.search(p_xml):
+        return False
+    visible = "".join(m.group(2) for m in _XML_T_RE.finditer(p_xml))
+    return visible.strip() == ""
+
+
+def _table_spans(xml: str) -> list[tuple[int, int]]:
+    """Byte offsets of ``w:tbl`` blocks, including nested tables."""
+    open_pat = re.compile(r"<(?:[\w.-]+:)?tbl\b[^>]*?(/>|>)")
+    close_pat = re.compile(r"</(?:[\w.-]+:)?tbl\s*>")
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    while True:
+        start = open_pat.search(xml, pos)
+        if not start:
+            break
+        if start.group(0).endswith("/>"):
+            spans.append(start.span())
+            pos = start.end()
+            continue
+        depth = 1
+        cursor = start.end()
+        while depth:
+            nxt_open = open_pat.search(xml, cursor)
+            nxt_close = close_pat.search(xml, cursor)
+            if not nxt_close:
+                break
+            if nxt_open and nxt_open.start() < nxt_close.start():
+                if not nxt_open.group(0).endswith("/>"):
+                    depth += 1
+                cursor = nxt_open.end()
+            else:
+                depth -= 1
+                cursor = nxt_close.end()
+        spans.append((start.start(), cursor))
+        pos = cursor
+    return spans
+
+
+def _in_spans(index: int, spans: list[tuple[int, int]]) -> bool:
+    return any(start <= index < end for start, end in spans)
+
+
+def remove_empty_paragraphs(xml: str) -> tuple[str, int]:
+    """Delete blank ``w:p`` lines left after Chinese-only paragraphs are stripped.
+
+    Paragraphs inside tables are kept: a cell must contain at least one ``w:p``.
+    """
+    if "<" not in xml:
+        return xml, 0
+    protected = _table_spans(xml)
+    chunks: list[str] = []
+    last = 0
+    removed = 0
+    for match in _W_P_RE.finditer(xml):
+        if _in_spans(match.start(), protected):
+            continue
+        if not paragraph_is_visually_blank(match.group(0)):
+            continue
+        chunks.append(xml[last:match.start()])
+        last = match.end()
+        removed += 1
+    if removed == 0:
+        return xml, 0
+    chunks.append(xml[last:])
+    return "".join(chunks), removed
+
+
 def _sub_count_chars(pattern: re.Pattern[str], text: str) -> tuple[str, int]:
     """Delete matches and count deleted characters (not regex-match count)."""
     removed = 0
@@ -163,6 +249,7 @@ def process_text_file(
     keep_punctuation: bool,
     collapse_spaces: bool,
     dry_run: bool,
+    remove_empty_lines: bool = True,
 ) -> dict:
     original = source.read_text(encoding="utf-8")
     cleaned, removed = strip_chinese(
@@ -170,7 +257,13 @@ def process_text_file(
         keep_punctuation=keep_punctuation,
         collapse_spaces=collapse_spaces,
     )
+    empty_removed = 0
+    if remove_empty_lines:
+        collapsed = collapse_blank_lines(cleaned)
+        empty_removed = cleaned.count("\n") - collapsed.count("\n")
+        cleaned = collapsed
     dest = dest or default_output_path(source)
+    changed = cleaned != original
     if not dry_run:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(cleaned, encoding="utf-8")
@@ -179,7 +272,8 @@ def process_text_file(
         "input": str(source),
         "output": None if dry_run else str(dest),
         "chars_removed": removed,
-        "files_changed": 1 if removed else 0,
+        "empty_paragraphs_removed": max(empty_removed, 0),
+        "files_changed": 1 if changed else 0,
         "dry_run": dry_run,
     }
 
@@ -190,13 +284,14 @@ def _rewrite_docx_part(
     *,
     keep_punctuation: bool,
     collapse_spaces: bool,
-) -> tuple[bytes, int, bool]:
+    remove_empty_lines: bool,
+) -> tuple[bytes, int, bool, int]:
     if not filename.lower().endswith(_XML_PART_SUFFIXES):
-        return data, 0, False
+        return data, 0, False, 0
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError:
-        return data, 0, False
+        return data, 0, False, 0
     cleaned, removed = strip_chinese(
         text,
         keep_punctuation=keep_punctuation,
@@ -204,9 +299,12 @@ def _rewrite_docx_part(
     )
     if collapse_spaces:
         cleaned = collapse_xml_text_node_spaces(cleaned)
+    empty_removed = 0
+    if remove_empty_lines and filename.lower().endswith(".xml"):
+        cleaned, empty_removed = remove_empty_paragraphs(cleaned)
     if cleaned == text:
-        return data, 0, False
-    return cleaned.encode("utf-8"), removed, True
+        return data, 0, False, 0
+    return cleaned.encode("utf-8"), removed, True, empty_removed
 
 
 def process_docx(
@@ -216,27 +314,31 @@ def process_docx(
     keep_punctuation: bool,
     collapse_spaces: bool,
     dry_run: bool,
+    remove_empty_lines: bool = True,
 ) -> dict:
     if not zipfile.is_zipfile(source):
         raise ValueError(f"Not a valid .docx (zip) file: {source}")
 
     dest = dest or default_output_path(source)
     total_removed = 0
+    empty_removed = 0
     files_changed = 0
     rewritten: list[tuple[zipfile.ZipInfo, bytes]] = []
 
     with zipfile.ZipFile(source, "r") as zin:
         for info in zin.infolist():
             data = zin.read(info.filename)
-            new_data, removed, changed = _rewrite_docx_part(
+            new_data, removed, changed, empty_n = _rewrite_docx_part(
                 info.filename,
                 data,
                 keep_punctuation=keep_punctuation,
                 collapse_spaces=collapse_spaces,
+                remove_empty_lines=remove_empty_lines,
             )
             if changed:
                 files_changed += 1
                 total_removed += removed
+                empty_removed += empty_n
             rewritten.append((info, new_data))
 
     if not dry_run:
@@ -258,6 +360,7 @@ def process_docx(
         "input": str(source),
         "output": None if dry_run else str(dest),
         "chars_removed": total_removed,
+        "empty_paragraphs_removed": empty_removed,
         "files_changed": files_changed,
         "dry_run": dry_run,
     }
@@ -270,6 +373,7 @@ def process_path(
     keep_punctuation: bool,
     collapse_spaces: bool,
     dry_run: bool,
+    remove_empty_lines: bool = True,
 ) -> dict:
     suffix = source.suffix.lower()
     if suffix == ".doc":
@@ -283,6 +387,7 @@ def process_path(
             keep_punctuation=keep_punctuation,
             collapse_spaces=collapse_spaces,
             dry_run=dry_run,
+            remove_empty_lines=remove_empty_lines,
         )
     if suffix in _TEXT_EXTENSIONS or suffix == "":
         return process_text_file(
@@ -291,6 +396,7 @@ def process_path(
             keep_punctuation=keep_punctuation,
             collapse_spaces=collapse_spaces,
             dry_run=dry_run,
+            remove_empty_lines=remove_empty_lines,
         )
     raise ValueError(f"Unsupported file type: {suffix or source.name}")
 
@@ -320,6 +426,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-collapse",
         action="store_true",
         help="Do not collapse leftover ASCII spaces after deletions",
+    )
+    parser.add_argument(
+        "--keep-empty-lines",
+        action="store_true",
+        help="Keep blank paragraphs left behind after Chinese-only lines are deleted",
     )
     parser.add_argument(
         "--dry-run",
@@ -360,6 +471,7 @@ def main(argv: list[str] | None = None) -> int:
                     keep_punctuation=args.keep_punctuation,
                     collapse_spaces=not args.no_collapse,
                     dry_run=args.dry_run,
+                    remove_empty_lines=not args.keep_empty_lines,
                 )
             )
     except ValueError as exc:

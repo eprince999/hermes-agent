@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import zipfile
 from pathlib import Path
@@ -37,11 +38,15 @@ def _paragraph(text: str) -> str:
     )
 
 
-def make_docx(path: Path, body_text: str, *, header_text: str | None = None) -> Path:
+def make_docx(path: Path, body_text: str | list[str], *, header_text: str | None = None) -> Path:
+    if isinstance(body_text, str):
+        paragraphs = _paragraph(body_text)
+    else:
+        paragraphs = "".join(_paragraph(t) for t in body_text)
     document_xml = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-        f"<w:body>{_paragraph(body_text)}</w:body>"
+        f"<w:body>{paragraphs}</w:body>"
         "</w:document>"
     )
     content_types = (
@@ -295,3 +300,101 @@ def test_cli_in_place_and_output_conflict(tmp_path: Path, capsys):
     code = mod.main([str(src), "--in-place", "-o", str(tmp_path / "y.docx")])
     assert code == 1
     assert "either --in-place or -o" in capsys.readouterr().err
+
+
+def test_collapse_blank_lines():
+    mod = load_module()
+    assert mod.collapse_blank_lines("Hello\n\n\nWorld\n") == "Hello\nWorld\n"
+
+
+def test_docx_removes_empty_paragraphs_left_by_chinese(tmp_path: Path):
+    mod = load_module()
+    src = make_docx(tmp_path / "lines.docx", ["Hello", "中文段落", "World"])
+    dest = tmp_path / "lines.en.docx"
+    result = mod.process_docx(
+        src,
+        dest,
+        keep_punctuation=False,
+        collapse_spaces=True,
+        dry_run=False,
+    )
+    xml = read_docx_xml(dest)
+    assert result["empty_paragraphs_removed"] == 1
+    assert xml.count("<w:p>") == 2
+    assert "Hello" in xml
+    assert "World" in xml
+    assert "中" not in xml
+    # No blank paragraph remaining between the two English lines.
+    assert ">Hello</w:t></w:r></w:p><w:p><w:r>" in xml or xml.index("Hello") < xml.index("World")
+    empty_paras = re.findall(
+        r"<w:p><w:r><w:t xml:space=\"preserve\"></w:t></w:r></w:p>", xml
+    )
+    assert empty_paras == []
+
+
+def test_keep_empty_lines_preserves_blank_paragraph(tmp_path: Path):
+    mod = load_module()
+    src = make_docx(tmp_path / "keep.docx", ["Hello", "中文", "World"])
+    dest = tmp_path / "keep.en.docx"
+    result = mod.process_docx(
+        src,
+        dest,
+        keep_punctuation=False,
+        collapse_spaces=True,
+        dry_run=False,
+        remove_empty_lines=False,
+    )
+    xml = read_docx_xml(dest)
+    assert result["empty_paragraphs_removed"] == 0
+    assert xml.count("<w:p>") == 3
+
+
+def test_already_stripped_file_drops_blank_lines(tmp_path: Path):
+    """Re-run on a file that already lost its Chinese but kept empty paras."""
+    mod = load_module()
+    src = make_docx(tmp_path / "blank.docx", ["Hello", "", "World"])
+    dest = tmp_path / "blank.en.docx"
+    result = mod.process_docx(
+        src,
+        dest,
+        keep_punctuation=False,
+        collapse_spaces=True,
+        dry_run=False,
+    )
+    xml = read_docx_xml(dest)
+    assert result["empty_paragraphs_removed"] == 1
+    assert xml.count("<w:p>") == 2
+    assert "Hello" in xml
+    assert "World" in xml
+
+
+def test_table_cell_keeps_placeholder_paragraph(tmp_path: Path):
+    mod = load_module()
+    document_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        "<w:body>"
+        "<w:tbl><w:tr><w:tc>"
+        "<w:p><w:r><w:t>中文</w:t></w:r></w:p>"
+        "</w:tc></w:tr></w:tbl>"
+        "<w:p><w:r><w:t>After</w:t></w:r></w:p>"
+        "</w:body></w:document>"
+    )
+    src = tmp_path / "table.docx"
+    with zipfile.ZipFile(src, "w") as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("_rels/.rels", "<Relationships/>")
+        zf.writestr("word/document.xml", document_xml)
+    dest = tmp_path / "table.en.docx"
+    mod.process_docx(
+        src,
+        dest,
+        keep_punctuation=False,
+        collapse_spaces=True,
+        dry_run=False,
+    )
+    xml = read_docx_xml(dest)
+    assert "<w:tc>" in xml
+    assert "<w:p>" in xml.split("<w:tc>", 1)[1].split("</w:tc>", 1)[0]
+    assert "After" in xml
+    assert "中" not in xml
