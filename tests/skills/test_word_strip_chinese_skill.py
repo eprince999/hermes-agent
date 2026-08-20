@@ -237,7 +237,8 @@ def test_docx_header_is_cleaned(tmp_path: Path):
         collapse_spaces=True,
         dry_run=False,
     )
-    assert result["files_changed"] == 2
+    assert result["files_changed"] == 1
+    assert result["chars_removed"] == 2
     header = read_docx_xml(dest, "word/header1.xml")
     assert "Confidential" in header
     assert "机" not in header
