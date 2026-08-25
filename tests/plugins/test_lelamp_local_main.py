@@ -92,6 +92,15 @@ def test_extract_spoken_command_from_padded_asr():
     assert extract_spoken_command("不要关灯") == "不要"
 
 
+def test_show_stage_prints_current_stage(capsys):
+    from plugins.lelamp import local_main
+
+    assert local_main.AGENT_STAGE >= 1
+    assert local_main.main(["--show-stage"]) == 0
+    out = capsys.readouterr().out.strip()
+    assert out.startswith(str(local_main.AGENT_STAGE))
+
+
 def test_main_sim_say_phrases_without_repl(capsys):
     from plugins.lelamp import local_main
 

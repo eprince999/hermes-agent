@@ -44,6 +44,8 @@ LeLamp is a 5V lamp. Use the 5V 2A supplies from the assembly guide.
 
 If the lamp is already assembled, copy `plugins/lelamp/local_main.py` to `~/lelamp_runtime/local_main.py`.
 
+Keep the runnable name `local_main.py`. After a stage works, copy it to `lamp_snapshots/` or `git commit` it; rollback by copying that snapshot back. Do not invent `local_main_v2.py` as the launcher.
+
 Stage 1 (keyboard, no cloud): `sudo uv run python local_main.py`. Type `你好` / `点头` / `暖光` / `关灯`. `--sim` prints actions without servos.
 
 Stage 2 (ReSpeaker keywords, still no OpenAI): `uv add vosk`, then `sudo uv run python local_main.py --download-vosk`, then `sudo uv run python local_main.py --listen`. Test mapping without the mic via `--say 请关灯`.

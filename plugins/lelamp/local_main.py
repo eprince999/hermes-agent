@@ -1,7 +1,17 @@
 """LeLamp local agent — Stages 1–2, no OpenAI, no LiveKit.
 
-Copy onto the Pi as ``~/lelamp_runtime/local_main.py`` (keep official
-``main.py`` as a backup). From the runtime repo root:
+Always copy onto the Pi as ``~/lelamp_runtime/local_main.py``.
+Do not rename the runnable file per stage. Snapshot instead::
+
+    mkdir -p ~/lelamp_runtime/lamp_snapshots
+    cp local_main.py lamp_snapshots/stage1-keyboard.py   # after a good test
+    git add local_main.py && git commit -m "lamp: stage 1 ok"
+
+Rollback::
+
+    cp lamp_snapshots/stage1-keyboard.py local_main.py
+
+Keep official ``main.py`` untouched. From the runtime repo root:
 
     sudo uv run python local_main.py
     sudo uv run python local_main.py --sim
@@ -34,6 +44,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 from urllib.request import urlretrieve
+
+# Bump when a stage lands. Printed at startup so a snapshot is identifiable.
+AGENT_STAGE = 2
+AGENT_LABEL = "keyboard + vosk listen"
 
 RECORDINGS = (
     "curious",
@@ -604,11 +618,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--say", action="append", default=[], help="inject a spoken phrase (repeatable)")
     parser.add_argument("--device", type=int, default=None, help="sounddevice input index")
     parser.add_argument("--model", type=Path, default=None, help="path to vosk-model-small-cn-0.22")
+    parser.add_argument("--show-stage", action="store_true", help="print stage number and exit")
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.show_stage:
+        print(f"{AGENT_STAGE} {AGENT_LABEL}")
+        return 0
+    print(f"local_main  stage {AGENT_STAGE}  ({AGENT_LABEL})")
     if args.download_vosk:
         download_vosk_model(args.model)
         return 0
