@@ -38,11 +38,13 @@ hermes lelamp setup --mode sim
 hermes lelamp setup --mode ssh --host pi@lelamp.local --runtime-dir /home/pi/lelamp_runtime --port /dev/ttyACM0
 ```
 
-LeLamp is **5V**. Never feed it a 2S 7.4V duck battery.
+LeLamp is a 5V lamp. Use the 5V 2A supplies from the assembly guide.
 
 ## How to Run
 
-Load this skill, then drive the body with tools (preferred) or CLI via `terminal`:
+If the lamp is already assembled and `lelamp_runtime` tests pass, the intelligent agent is `main.py` on the Pi. Copy `plugins/lelamp/runtime_main.py` over `~/lelamp_runtime/main.py`, put keys in `.env`, then `sudo uv run main.py console`.
+
+On this machine, load this skill and drive a sim/SSH body with:
 
 - `lelamp_status` — mode, last pose, last color, circadian hint
 - `lelamp_express` — play a recording
@@ -88,8 +90,8 @@ Official recordings: `wake_up`, `nod`, `headshake`, `curious`, `scanning`, `exci
 
 - Do not invent recording names. Unknown expressions are rejected before any servo moves.
 - Do not fully spin the base yaw or head yaw past about ±90° from center during calibration.
-- Pi Zero 2W cannot run Hermes locally. Keep the brain on this machine; the Pi only replays motion and RGB.
-- One Pi cannot run Open Duck and LeLamp at the same time. Use another SD card or another board.
+- Pi Zero 2W cannot run the LLM locally. `main.py` uses OpenAI Realtime in the cloud; the Pi only does mic, speaker, servos, and LEDs.
+- One Raspberry Pi should run only this lamp's runtime while you talk to it.
 - RGB on hardware needs `uv sync --extra hardware` on the Pi. Motion replay does not.
 
 ## Verification

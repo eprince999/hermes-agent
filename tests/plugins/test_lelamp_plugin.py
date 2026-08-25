@@ -197,6 +197,33 @@ def test_slash_chinese_hello_plays_wake_up(_isolate_home):
     assert payload["expression"] == "wake_up"
 
 
+def test_runtime_main_is_self_contained_and_allowlisted():
+    import ast
+
+    path = Path(__file__).resolve().parents[2] / "plugins" / "lelamp" / "runtime_main.py"
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    recordings = None
+    aliases = None
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if "RECORDINGS" in names:
+            recordings = ast.literal_eval(node.value)
+        if "ALIASES" in names:
+            aliases = ast.literal_eval(node.value)
+    assert recordings, "runtime_main.py must define RECORDINGS"
+    assert aliases, "runtime_main.py must define ALIASES"
+    assert "wake_up" in recordings
+    assert "idle" in recordings
+    unknown = {name: target for name, target in aliases.items() if target not in recordings}
+    assert not unknown, unknown
+    assert "class LeLamp" in source
+    assert "async def express" in source
+    assert "cli.run_app" in source
+
+
 def test_skill_frontmatter_stays_short():
     import re
 
