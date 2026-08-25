@@ -206,13 +206,18 @@ def test_runtime_main_is_self_contained_and_allowlisted():
     recordings = None
     aliases = None
     for node in tree.body:
-        if not isinstance(node, ast.Assign):
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names = [node.target.id]
+            value = node.value
+        elif isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+            value = node.value
+        else:
             continue
-        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
         if "RECORDINGS" in names:
-            recordings = ast.literal_eval(node.value)
+            recordings = ast.literal_eval(value)
         if "ALIASES" in names:
-            aliases = ast.literal_eval(node.value)
+            aliases = ast.literal_eval(value)
     assert recordings, "runtime_main.py must define RECORDINGS"
     assert aliases, "runtime_main.py must define ALIASES"
     assert "wake_up" in recordings
