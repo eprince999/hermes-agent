@@ -227,6 +227,10 @@ def test_runtime_main_is_self_contained_and_allowlisted():
     assert "class LeLamp" in source
     assert "async def express" in source
     assert "cli.run_app" in source
+    assert "def load_runtime_env" in source
+    assert "def require_openai_api_key" in source
+    assert 'Path(__file__).resolve().parent / ".env"' in source
+    assert "api_key=api_key" in source
 
 
 def test_skill_frontmatter_stays_short():

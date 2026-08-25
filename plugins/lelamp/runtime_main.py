@@ -12,6 +12,7 @@ import getpass
 import os
 import subprocess
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from dotenv import load_dotenv
@@ -21,7 +22,32 @@ from livekit.plugins import noise_cancellation, openai
 from lelamp.service.motors.motors_service import MotorsService
 from lelamp.service.rgb.rgb_service import RGBService
 
-load_dotenv()
+
+def load_runtime_env() -> None:
+    """Load ``.env`` next to this file, then cwd. Job workers often change cwd."""
+    here = Path(__file__).resolve().parent / ".env"
+    if here.is_file():
+        load_dotenv(here, override=False)
+    load_dotenv(override=False)
+
+
+def require_openai_api_key() -> str:
+    """RealtimeModel reads the env var; sudo will not keep a shell export."""
+    key = (os.environ.get("OPENAI_API_KEY") or "").strip().strip('"').strip("'")
+    if key:
+        os.environ["OPENAI_API_KEY"] = key
+        return key
+    env_path = Path(__file__).resolve().parent / ".env"
+    raise SystemExit(
+        "Missing OPENAI_API_KEY.\n"
+        f"Create {env_path} with one line:\n"
+        "  OPENAI_API_KEY=sk-...\n"
+        "sudo does not keep keys exported in your shell; the key must be in .env.\n"
+        "Then rerun: sudo uv run main.py console"
+    )
+
+
+load_runtime_env()
 
 # Official CSV stems in lelamp/recordings/. Unknown names are rejected.
 RECORDINGS = (
@@ -331,9 +357,14 @@ class LeLamp(Agent):
 
 
 async def entrypoint(ctx: JobContext) -> None:
+    load_runtime_env()
+    api_key = require_openai_api_key()
     agent = LeLamp()
     session = AgentSession(
-        llm=openai.realtime.RealtimeModel(voice=os.environ.get("LELAMP_VOICE", "alloy")),
+        llm=openai.realtime.RealtimeModel(
+            api_key=api_key,
+            voice=os.environ.get("LELAMP_VOICE", "alloy"),
+        ),
     )
     await session.start(
         room=ctx.room,

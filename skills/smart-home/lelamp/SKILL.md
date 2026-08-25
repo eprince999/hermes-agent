@@ -44,7 +44,7 @@ LeLamp is a 5V lamp. Use the 5V 2A supplies from the assembly guide.
 
 If the lamp is already assembled and `lelamp_runtime` tests pass, the intelligent agent is `main.py` on the Pi. Copy `plugins/lelamp/runtime_main.py` over `~/lelamp_runtime/main.py`, put keys in `.env`, then `sudo uv run main.py console`.
 
-On this machine, load this skill and drive a sim/SSH body with:
+On this machine, load this skill and drive a sim/SSH body with `terminal` plus:
 
 - `lelamp_status` — mode, last pose, last color, circadian hint
 - `lelamp_express` — play a recording
@@ -90,7 +90,7 @@ Official recordings: `wake_up`, `nod`, `headshake`, `curious`, `scanning`, `exci
 
 - Do not invent recording names. Unknown expressions are rejected before any servo moves.
 - Do not fully spin the base yaw or head yaw past about ±90° from center during calibration.
-- Pi Zero 2W cannot run the LLM locally. `main.py` uses OpenAI Realtime in the cloud; the Pi only does mic, speaker, servos, and LEDs.
+- Pi Zero 2W cannot run the LLM locally. `main.py` uses OpenAI Realtime in the cloud; the Pi only does mic, speaker, servos, and LEDs. Put `OPENAI_API_KEY` in `~/lelamp_runtime/.env`. `sudo` drops shell exports; a missing key crashes at `RealtimeModel`.
 - One Raspberry Pi should run only this lamp's runtime while you talk to it.
 - RGB on hardware needs `uv sync --extra hardware` on the Pi. Motion replay does not.
 
