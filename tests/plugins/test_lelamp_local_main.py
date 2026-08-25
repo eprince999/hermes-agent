@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from plugins.lelamp.local_main import LocalLamp, parse_line
+from plugins.lelamp.local_main import LocalLamp, extract_spoken_command, parse_line
 
 
 def _source() -> str:
@@ -83,3 +83,20 @@ def test_main_sim_scripted_session(monkeypatch, capsys):
     assert "好的。" in out
     assert "expression=nod" in out
     assert "好，我先歇着。" in out
+
+
+def test_extract_spoken_command_from_padded_asr():
+    assert extract_spoken_command("请关灯") == "关灯"
+    assert extract_spoken_command("你 好 呀") == "你好"
+    assert extract_spoken_command("今天天气怎么样") is None
+    assert extract_spoken_command("不要关灯") == "不要"
+
+
+def test_main_sim_say_phrases_without_repl(capsys):
+    from plugins.lelamp import local_main
+
+    assert local_main.main(["--sim", "--no-wake", "--say", "请点头", "--say", "关灯"]) == 0
+    out = capsys.readouterr().out
+    assert "play nod" in out
+    assert "rgb (0, 0, 0)" in out
+    assert "关灯。" in out

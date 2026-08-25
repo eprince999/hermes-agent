@@ -1,16 +1,20 @@
-"""LeLamp local agent — Stage 1, no OpenAI, no LiveKit.
+"""LeLamp local agent — Stages 1–2, no OpenAI, no LiveKit.
 
 Copy onto the Pi as ``~/lelamp_runtime/local_main.py`` (keep official
 ``main.py`` as a backup). From the runtime repo root:
 
     sudo uv run python local_main.py
-    sudo uv run python local_main.py --sim    # print actions, no hardware
+    sudo uv run python local_main.py --sim
+    sudo uv run python local_main.py --say 你好 --say 关灯
+    sudo uv run python local_main.py --download-vosk
+    sudo uv run python local_main.py --listen
 
-Type Chinese (or English) commands, then Enter. ``q`` quits.
+Type Chinese commands, or with ``--listen`` speak them to the ReSpeaker.
+``q`` or Ctrl+C quits.
 
-Roadmap (one stage at a time):
-  1. this file — keyboard + motors + RGB
-  2. on-device speech keywords (ReSpeaker), still no cloud LLM
+Roadmap:
+  1. keyboard + motors + RGB
+  2. on-device speech keywords (this file, Vosk, no cloud)
   3. a Chinese model you choose (DeepSeek / Qwen / Ollama), not OpenAI
   4. spoken replies on the speaker
 """
@@ -18,11 +22,18 @@ Roadmap (one stage at a time):
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import queue
+import select
 import sys
+import threading
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Optional, Sequence, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+from urllib.request import urlretrieve
 
 RECORDINGS = (
     "curious",
@@ -142,11 +153,15 @@ LIGHT_ONLY: Dict[str, str] = {
     "专注": "focus",
 }
 
-HELP_TEXT = """本地台灯 Stage 1（无 OpenAI）
+HELP_TEXT = """本地台灯 Stage 2（无 OpenAI）
 动作：你好 / 点头 / 摇头 / 好奇 / 张望 / 开心 / 兴奋 / 惊讶 / 害羞 / 难过 / 待机
 灯光：开灯 / 关灯 / 暖光 / 冷光 / 自动 / 亮一点 / 暗一点
-其它：status  rgb 255 176 80  volume 80  help  q
+说话：启动时加 --listen（先 --download-vosk）
+其它：status  rgb 255 176 80  help  q
 """
+
+VOSK_MODEL_NAME = "vosk-model-small-cn-0.22"
+VOSK_MODEL_URL = f"https://alphacephei.com/vosk/models/{VOSK_MODEL_NAME}.zip"
 
 
 @dataclass(frozen=True)
@@ -260,6 +275,203 @@ def parse_line(line: str) -> Command:
         "idle": "我歇一会儿。",
     }.get(recording, recording)
     return Command("express", recording, spoken)
+
+
+def command_phrases() -> List[str]:
+    extra = ("亮一点", "亮一些", "亮点", "暗一点", "暗一些", "暗点", "最亮", "最暗", "帮助", "退出")
+    phrases = set(LIGHT_ONLY) | set(ALIASES) | set(RECORDINGS) | set(extra)
+    return sorted(phrases, key=lambda item: (-len(item), item))
+
+
+def _compact_speech(transcript: str) -> str:
+    text = (transcript or "").strip()
+    for token in (" ", "\t", "，", "。", "！", "？", ",", ".", "!", "?", "、"):
+        text = text.replace(token, "")
+    return text
+
+
+def extract_spoken_command(transcript: str) -> Optional[str]:
+    """Pick a Stage-1 command out of an ASR transcript, or None."""
+    compact = _compact_speech(transcript)
+    if not compact:
+        return None
+    direct = parse_line(compact)
+    if direct.kind != "unknown":
+        return compact
+    best_phrase = None
+    best_pos = 10**9
+    best_len = 0
+    for phrase in command_phrases():
+        pos = compact.find(phrase)
+        if pos < 0:
+            continue
+        if pos < best_pos or (pos == best_pos and len(phrase) > best_len):
+            best_phrase = phrase
+            best_pos = pos
+            best_len = len(phrase)
+    return best_phrase
+
+
+def vosk_model_dir() -> Path:
+    override = os.environ.get("LELAMP_VOSK_MODEL")
+    if override:
+        return Path(override)
+    here = Path(__file__).resolve().parent
+    return here / "models" / VOSK_MODEL_NAME
+
+
+def download_vosk_model(dest: Optional[Path] = None) -> Path:
+    target = dest or vosk_model_dir()
+    marker = target / "am" / "final.mdl"
+    if marker.is_file():
+        print(f"vosk model already at {target}")
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    zip_path = target.parent / f"{VOSK_MODEL_NAME}.zip"
+    print(f"downloading {VOSK_MODEL_URL}")
+    urlretrieve(VOSK_MODEL_URL, zip_path)
+    with zipfile.ZipFile(zip_path) as zf:
+        for info in zf.infolist():
+            name = info.filename.replace("\\", "/")
+            if name.startswith("..") or name.startswith("/"):
+                raise RuntimeError(f"unsafe zip entry: {name}")
+        zf.extractall(target.parent)
+    zip_path.unlink(missing_ok=True)
+    if not marker.is_file():
+        raise RuntimeError(f"vosk model missing after extract: {target}")
+    print(f"vosk model ready at {target}")
+    return target
+
+
+def find_input_device(preferred: Optional[int] = None):
+    import sounddevice as sd
+
+    if preferred is not None:
+        return preferred
+    for index, device in enumerate(sd.query_devices()):
+        name = str(device.get("name") or "")
+        if "seeed" in name.lower() and int(device.get("max_input_channels") or 0) > 0:
+            print(f"using ReSpeaker input: {index} {name}")
+            return index
+    default = sd.default.device[0]
+    print(f"no seeed input, using default device {default}")
+    return default
+
+
+def vosk_listen_worker(
+    out_q: "queue.Queue[str]",
+    stop: threading.Event,
+    *,
+    device: Optional[int],
+    model_path: Path,
+) -> None:
+    try:
+        import sounddevice as sd
+        import vosk
+    except ImportError as exc:
+        out_q.put(f"__error__ 缺依赖 {exc}. 在 ~/lelamp_runtime 执行: uv add vosk")
+        return
+    if not (model_path / "am" / "final.mdl").is_file():
+        out_q.put("__error__ 还没有中文离线模型。先运行: sudo uv run python local_main.py --download-vosk")
+        return
+    try:
+        model = vosk.Model(str(model_path))
+        rec = vosk.KaldiRecognizer(model, 16000)
+        rec.SetWords(True)
+        index = find_input_device(device)
+        with sd.RawInputStream(
+            samplerate=16000,
+            blocksize=8000,
+            device=index,
+            dtype="int16",
+            channels=1,
+        ) as stream:
+            out_q.put("__ready__")
+            last_partial = ""
+            while not stop.is_set():
+                data, _overflow = stream.read(8000)
+                chunk = bytes(data)
+                if rec.AcceptWaveform(chunk):
+                    payload = json.loads(rec.Result())
+                    text = (payload.get("text") or "").strip()
+                    if text:
+                        out_q.put(text)
+                    last_partial = ""
+                else:
+                    payload = json.loads(rec.PartialResult())
+                    partial = (payload.get("partial") or "").strip()
+                    if partial and partial != last_partial:
+                        last_partial = partial
+                        out_q.put(f"__partial__ {partial}")
+    except Exception as exc:
+        out_q.put(f"__error__ 麦克风失败: {exc}")
+
+
+def dispatch_text(lamp: LocalLamp, raw: str) -> str:
+    cmd = parse_line(raw)
+    if cmd.kind == "quit":
+        print(cmd.reply)
+        return "quit"
+    text = lamp.apply(cmd)
+    if text:
+        print(text)
+    return cmd.kind
+
+
+def apply_speech(lamp: LocalLamp, transcript: str) -> str:
+    print(f"灯< {transcript}")
+    phrase = extract_spoken_command(transcript)
+    if not phrase:
+        print(f"听到「{transcript}」，但不是灯的指令。")
+        return "unknown"
+    if phrase != _compact_speech(transcript):
+        print(f"听成：{phrase}")
+    return dispatch_text(lamp, phrase)
+
+
+def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path) -> int:
+    stop = threading.Event()
+    out_q: "queue.Queue[str]" = queue.Queue()
+    worker = threading.Thread(
+        target=vosk_listen_worker,
+        kwargs={"out_q": out_q, "stop": stop, "device": device, "model_path": model_path},
+        daemon=True,
+    )
+    worker.start()
+    print("麦克风线程已开。请说：你好、点头、关灯。打字回车也可以。")
+    try:
+        while True:
+            try:
+                item = out_q.get(timeout=0.1)
+            except queue.Empty:
+                item = None
+            if item == "__ready__":
+                print("麦克风好了，请说话。")
+            elif item and item.startswith("__partial__ "):
+                print(f"\r听… {item[len('__partial__ '):]}", end="", flush=True)
+            elif item and item.startswith("__error__ "):
+                print()
+                print(item[len("__error__ "):])
+                return 1
+            elif item:
+                print()
+                if apply_speech(lamp, item) == "quit":
+                    return 0
+            if select.select([sys.stdin], [], [], 0)[0]:
+                line = sys.stdin.readline()
+                if line == "":
+                    print("好，我先歇着。")
+                    return 0
+                print()
+                if dispatch_text(lamp, line) == "quit":
+                    return 0
+    except KeyboardInterrupt:
+        print()
+        print("好，我先歇着。")
+        return 0
+    finally:
+        stop.set()
+
 
 
 class LocalLamp:
@@ -381,17 +593,25 @@ class LocalLamp:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="LeLamp local Stage 1 (no OpenAI)")
+    parser = argparse.ArgumentParser(description="LeLamp local Stages 1–2 (no OpenAI)")
     parser.add_argument("--sim", action="store_true", help="no motors/LED, print actions")
     parser.add_argument("--port", default=os.environ.get("LELAMP_PORT", "/dev/ttyACM0"))
     parser.add_argument("--id", dest="lamp_id", default=os.environ.get("LELAMP_ID", "lelamp"))
     parser.add_argument("--led-count", type=int, default=int(os.environ.get("LELAMP_LED_COUNT", "64")))
     parser.add_argument("--no-wake", action="store_true", help="skip wake_up on start")
+    parser.add_argument("--listen", action="store_true", help="Stage 2: Vosk keywords on the mic")
+    parser.add_argument("--download-vosk", action="store_true", help="download offline Chinese Vosk model")
+    parser.add_argument("--say", action="append", default=[], help="inject a spoken phrase (repeatable)")
+    parser.add_argument("--device", type=int, default=None, help="sounddevice input index")
+    parser.add_argument("--model", type=Path, default=None, help="path to vosk-model-small-cn-0.22")
     return parser
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.download_vosk:
+        download_vosk_model(args.model)
+        return 0
     lamp = LocalLamp(
         sim=args.sim,
         port=args.port,
@@ -403,6 +623,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if not args.no_wake:
             lamp.wake()
+        for phrase in args.say:
+            if apply_speech(lamp, phrase) == "quit":
+                return 0
+        if args.say and not args.listen:
+            return 0
+        if args.listen:
+            model_path = args.model if args.model is not None else vosk_model_dir()
+            return run_listen_loop(lamp, device=args.device, model_path=Path(model_path))
         while True:
             try:
                 raw = input("灯> ")
@@ -410,13 +638,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print()
                 print("好，我先歇着。")
                 return 0
-            cmd = parse_line(raw)
-            if cmd.kind == "quit":
-                print(cmd.reply)
+            if dispatch_text(lamp, raw) == "quit":
                 return 0
-            text = lamp.apply(cmd)
-            if text:
-                print(text)
     finally:
         lamp.stop()
     return 0

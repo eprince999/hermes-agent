@@ -42,7 +42,11 @@ LeLamp is a 5V lamp. Use the 5V 2A supplies from the assembly guide.
 
 ## How to Run
 
-If the lamp is already assembled, start with the **no-OpenAI** Stage 1 agent: copy `plugins/lelamp/local_main.py` to `~/lelamp_runtime/local_main.py`, then `sudo uv run python local_main.py`. Type `你好` / `点头` / `暖光` / `关灯`. Use `--sim` to print actions without moving servos.
+If the lamp is already assembled, copy `plugins/lelamp/local_main.py` to `~/lelamp_runtime/local_main.py`.
+
+Stage 1 (keyboard, no cloud): `sudo uv run python local_main.py`. Type `你好` / `点头` / `暖光` / `关灯`. `--sim` prints actions without servos.
+
+Stage 2 (ReSpeaker keywords, still no OpenAI): `uv add vosk`, then `sudo uv run python local_main.py --download-vosk`, then `sudo uv run python local_main.py --listen`. Test mapping without the mic via `--say 请关灯`.
 
 The LiveKit + OpenAI Realtime path is optional later: copy `plugins/lelamp/runtime_main.py` over `~/lelamp_runtime/main.py`, put `OPENAI_API_KEY` in `.env`, then `sudo uv run main.py console`.
 
@@ -94,7 +98,7 @@ Official recordings: `wake_up`, `nod`, `headshake`, `curious`, `scanning`, `exci
 - Do not fully spin the base yaw or head yaw past about ±90° from center during calibration.
 - Pi Zero 2W cannot run the LLM locally. `main.py` uses OpenAI Realtime in the cloud; the Pi only does mic, speaker, servos, and LEDs. Put `OPENAI_API_KEY` in `~/lelamp_runtime/.env`. `sudo` drops shell exports; a missing key crashes at `RealtimeModel`.
 - One Raspberry Pi should run only this lamp's runtime while you talk to it.
-- RGB on hardware needs `uv sync --extra hardware` on the Pi. Motion replay does not.
+- Stage 2 speech uses offline Vosk, not OpenAI. Speak one short command and pause. Filler like `嗯` maps to nod.
 
 ## Verification
 
