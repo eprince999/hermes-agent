@@ -253,3 +253,4 @@ def test_skill_frontmatter_stays_short():
     assert "`lelamp_express`" in text
     assert "`lelamp_light`" in text
     assert "`lelamp_status`" in text
+    assert "local_main.py" in text

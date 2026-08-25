@@ -42,7 +42,9 @@ LeLamp is a 5V lamp. Use the 5V 2A supplies from the assembly guide.
 
 ## How to Run
 
-If the lamp is already assembled and `lelamp_runtime` tests pass, the intelligent agent is `main.py` on the Pi. Copy `plugins/lelamp/runtime_main.py` over `~/lelamp_runtime/main.py`, put keys in `.env`, then `sudo uv run main.py console`.
+If the lamp is already assembled, start with the **no-OpenAI** Stage 1 agent: copy `plugins/lelamp/local_main.py` to `~/lelamp_runtime/local_main.py`, then `sudo uv run python local_main.py`. Type `你好` / `点头` / `暖光` / `关灯`. Use `--sim` to print actions without moving servos.
+
+The LiveKit + OpenAI Realtime path is optional later: copy `plugins/lelamp/runtime_main.py` over `~/lelamp_runtime/main.py`, put `OPENAI_API_KEY` in `.env`, then `sudo uv run main.py console`.
 
 On this machine, load this skill and drive a sim/SSH body with `terminal` plus:
 

@@ -1,0 +1,85 @@
+"""Stage 1 local lamp: keyboard commands, no OpenAI/LiveKit."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from plugins.lelamp.local_main import LocalLamp, parse_line
+
+
+def _source() -> str:
+    return (
+        Path(__file__).resolve().parents[2] / "plugins" / "lelamp" / "local_main.py"
+    ).read_text(encoding="utf-8")
+
+
+def test_local_main_does_not_import_openai_or_livekit():
+    source = _source()
+    lowered = source.lower()
+    assert "from livekit" not in lowered
+    assert "import openai" not in lowered
+    assert "plugins.openai" not in lowered
+    assert "realtimemodel" not in lowered
+
+
+def test_hello_is_wake_up_not_a_light_command():
+    cmd = parse_line("你好")
+    assert cmd.kind == "express"
+    assert cmd.payload == "wake_up"
+
+
+def test_off_is_light_only_not_headshake():
+    cmd = parse_line("关灯")
+    assert cmd.kind == "mood"
+    assert cmd.payload == "off"
+
+
+def test_on_uses_circadian_auto():
+    cmd = parse_line("开灯")
+    assert cmd.kind == "mood"
+    assert cmd.payload == "auto"
+
+
+def test_quit_and_unknown():
+    assert parse_line("q").kind == "quit"
+    unknown = parse_line("跳个舞")
+    assert unknown.kind == "unknown"
+
+
+def test_brightness_and_rgb_parse():
+    assert parse_line("亮一点") == parse_line("亮一点")
+    delta = parse_line("亮一点")
+    assert delta.kind == "brightness_delta"
+    assert delta.payload == 15
+    rgb = parse_line("rgb 255 176 80")
+    assert rgb.kind == "rgb"
+    assert rgb.payload == (255, 176, 80)
+
+
+def test_sim_express_then_off_updates_state():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    assert "你好呀" in lamp.apply(parse_line("你好"))
+    assert lamp.last_expression == "wake_up"
+    assert lamp.last_rgb != (0, 0, 0)
+    lamp.apply(parse_line("关灯"))
+    assert lamp.last_rgb == (0, 0, 0)
+    lamp.apply(parse_line("亮一点"))
+    assert lamp.brightness == 85
+
+
+def test_main_sim_scripted_session(monkeypatch, capsys):
+    from plugins.lelamp import local_main
+
+    lines = iter(["点头", "status", "q"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
+    assert local_main.main(["--sim", "--no-wake"]) == 0
+    out = capsys.readouterr().out
+    assert "好的。" in out
+    assert "expression=nod" in out
+    assert "好，我先歇着。" in out
