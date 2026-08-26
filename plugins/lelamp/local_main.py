@@ -27,6 +27,7 @@ Roadmap:
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import queue
@@ -433,6 +434,59 @@ def _cursor_run_text(run) -> str:
     return str(run)
 
 
+def _callable_kwargs(fn, kwargs: dict) -> dict:
+    """Drop kwargs the installed cursor-sdk does not accept."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return dict(kwargs)
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return dict(kwargs)
+    names = {
+        name
+        for name, p in params.items()
+        if p.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+        and name not in {"self", "cls"}
+    }
+    return {key: value for key, value in kwargs.items() if key in names}
+
+
+def create_cursor_agent(*, model: str, api_key: str, local, agent_cls=None):
+    """Create a local Cursor agent. tools= belongs on AgentOptions, not create()."""
+    if agent_cls is None:
+        from cursor_sdk import Agent as agent_cls
+    try:
+        from cursor_sdk import AgentOptions
+    except ImportError:
+        AgentOptions = None
+    if AgentOptions is not None:
+        option_kwargs = _callable_kwargs(
+            AgentOptions,
+            {"model": model, "api_key": api_key, "tools": ["mcp"], "local": local},
+        )
+        try:
+            options = AgentOptions(**option_kwargs)
+        except TypeError:
+            option_kwargs.pop("tools", None)
+            options = AgentOptions(**option_kwargs)
+        try:
+            return agent_cls.create(options)
+        except TypeError:
+            try:
+                return agent_cls.create(options=options)
+            except TypeError:
+                pass
+    return agent_cls.create(
+        **_callable_kwargs(
+            agent_cls.create,
+            {"model": model, "api_key": api_key, "local": local},
+        )
+    )
+
+
 class CursorLampSession:
     """Cursor local agent that can only move this lamp (no repo edits)."""
 
@@ -469,10 +523,9 @@ class CursorLampSession:
         def _rgb(args, _context=None):
             return execute_lamp_tool(lamp, "set_rgb", args)
 
-        self._agent = Agent.create(
+        self._agent = create_cursor_agent(
             model=model,
             api_key=key,
-            tools=["mcp"],
             local=LocalAgentOptions(
                 cwd=str(self._workspace),
                 custom_tools={

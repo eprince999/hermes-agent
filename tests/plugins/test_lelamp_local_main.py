@@ -131,6 +131,27 @@ def test_main_sim_say_phrases_without_repl(capsys):
     assert "关灯。" in out
 
 
+def test_create_cursor_agent_omits_unsupported_tools_kwarg():
+    from plugins.lelamp.local_main import create_cursor_agent
+
+    seen = {}
+
+    class FakeAgent:
+        @staticmethod
+        def create(model, api_key, local):
+            seen["kwargs"] = {"model": model, "api_key": api_key, "local": local}
+            return "agent"
+
+    agent = create_cursor_agent(
+        model="composer-2.5",
+        api_key="crsr_test",
+        local={"cwd": "/tmp"},
+        agent_cls=FakeAgent,
+    )
+    assert agent == "agent"
+    assert "tools" not in seen["kwargs"]
+
+
 def test_execute_lamp_tool_moves_and_lights():
     lamp = LocalLamp(
         sim=True,
