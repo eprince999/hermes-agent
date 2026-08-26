@@ -532,6 +532,8 @@ def test_english_keywords_parse_and_reply():
 def test_bilingual_helpers():
     assert speech_lang("今天几号了") == "zh"
     assert speech_lang("what day is it") == "en"
+    assert speech_lang("q") == "zh"
+    assert speech_lang("hi") == "en"
     assert wake_ack("你好台灯") == "我在。"
     assert wake_ack("hello lamp") == "I'm here."
     assert utterance_too_short("今天") is True

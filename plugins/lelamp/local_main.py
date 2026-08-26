@@ -312,7 +312,9 @@ def speech_lang(text: str) -> str:
     raw = text or ""
     cjk = sum(1 for ch in raw if "\u4e00" <= ch <= "\u9fff")
     latin = sum(1 for ch in raw if ("A" <= ch <= "Z") or ("a" <= ch <= "z"))
-    return "en" if latin > cjk else "zh"
+    if latin > cjk and latin >= 2:
+        return "en"
+    return "zh"
 
 
 def spoken_for(recording: str, source: str) -> str:
