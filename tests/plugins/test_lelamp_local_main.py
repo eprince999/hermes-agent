@@ -263,6 +263,28 @@ def test_install_hint_is_mpg123_not_ffmpeg():
     assert "sudo apt install -y mpg123" in source
 
 
+def test_default_audio_is_seeed_not_bluetooth():
+    from plugins.lelamp import local_main
+
+    assert local_main.AUDIO_PREFER == "seeed"
+    args = local_main.build_parser().parse_args([])
+    assert args.audio == "seeed"
+
+
+def test_choose_playback_seeed_skips_bluetooth(monkeypatch):
+    from plugins.lelamp import local_main
+
+    monkeypatch.setattr(
+        local_main,
+        "find_bluetooth_playback",
+        lambda: (_ for _ in ()).throw(AssertionError("seeed must not probe bluetooth")),
+    )
+    monkeypatch.setattr(local_main, "find_alsa_playback", lambda: ("plughw:0,0", "0"))
+    monkeypatch.setattr(local_main, "unmute_alsa_card", lambda card: None)
+    device, card, backend = local_main.choose_playback(prefer="seeed")
+    assert (device, card, backend) == ("plughw:0,0", "0", "alsa")
+
+
 def test_music_rgb_pulse_does_not_play_recordings():
     lamp = LocalLamp(
         sim=True,

@@ -18,10 +18,10 @@ Keep official ``main.py`` untouched. From the runtime repo root:
 
 Type Chinese commands, or with ``--listen`` speak them to the ReSpeaker.
 Say 音乐 to play a random file from the music/ folder. ``q`` or Ctrl+C quits.
-Music prefers a paired Bluetooth speaker, then the ReSpeaker; never HDMI.
+Music plays on the lamp ReSpeaker speaker by default (never HDMI).
+Optional ``--audio bt`` uses a paired Bluetooth speaker instead.
 Install the mp3 CLI with ``sudo apt update && sudo apt install -y mpg123``
-(do not install ffmpeg — it pulls a huge GUI stack). Pair a speaker with
-``sudo uv run python local_main.py --bt-connect``.
+(do not install ffmpeg — it pulls a huge GUI stack).
 
 Roadmap:
   1. keyboard + motors + RGB
@@ -1070,30 +1070,28 @@ def _stop_process(proc: Optional["subprocess.Popen[bytes]"]) -> None:
         _stop_process(buddy)
 
 
-AUDIO_PREFER = "auto"
+AUDIO_PREFER = "seeed"
 
 
 def choose_playback(*, prefer: Optional[str] = None) -> Tuple[Optional[str], Optional[str], str]:
-    """Return (device, card, backend). Bluetooth first. Never HDMI."""
-    global _BT_TRIED
-    mode = (prefer or AUDIO_PREFER or os.environ.get("LELAMP_AUDIO") or "auto").strip().lower()
-    if mode in {"bt", "bluetooth", "auto"}:
+    """Return (device, card, backend). ReSpeaker by default. Never HDMI."""
+    mode = (prefer or AUDIO_PREFER or os.environ.get("LELAMP_AUDIO") or "seeed").strip().lower()
+    if mode in {"bt", "bluetooth"}:
         device, card, backend = find_bluetooth_playback()
         if not device and not _BT_TRIED:
-            connect_bluetooth_speaker(quiet=(mode == "auto"))
+            connect_bluetooth_speaker(quiet=False)
             device, card, backend = find_bluetooth_playback()
         if device:
             print(f"喇叭 蓝牙 {device}")
             return device, card, backend
-        if mode in {"bt", "bluetooth"}:
-            print("没有蓝牙音箱，不使用 HDMI。")
-            return None, None, "alsa"
+        print("没有蓝牙音箱，不使用 HDMI。")
+        return None, None, "alsa"
     device, card = find_alsa_playback()
     if device:
         unmute_alsa_card(card)
         print(f"喇叭 ReSpeaker {device}")
         return device, card, "alsa"
-    print("没有 ReSpeaker/蓝牙喇叭。不会使用 HDMI。")
+    print("没有 ReSpeaker 喇叭。不会使用 HDMI。")
     return None, None, "alsa"
 
 
@@ -1108,7 +1106,7 @@ def start_music_player(path: Path) -> Optional["subprocess.Popen[bytes]"]:
     device, card, backend = choose_playback()
     env = _player_env(device, card, backend=backend)
     if not device:
-        print("没有可用喇叭。配对蓝牙音箱：sudo uv run python local_main.py --bt-connect")
+        print("没有 ReSpeaker 喇叭。不会使用 HDMI。")
         return None
     for argv in music_player_commands(path, device=device, backend=backend):
         proc = _spawn_player(argv, env=env)
@@ -1621,8 +1619,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--audio",
         choices=("auto", "bt", "seeed"),
-        default=(os.environ.get("LELAMP_AUDIO") or "auto"),
-        help="music output: bluetooth first (auto/bt) or ReSpeaker (seeed). Never HDMI.",
+        default=(os.environ.get("LELAMP_AUDIO") or "seeed"),
+        help="music output: ReSpeaker (seeed, default), bluetooth (bt), or auto. Never HDMI.",
     )
     parser.add_argument("--bt-connect", action="store_true", help="connect a paired Bluetooth speaker and exit")
     parser.add_argument("--bt-mac", default=None, help="Bluetooth MAC to connect, e.g. AA:BB:CC:DD:EE:FF")
@@ -1654,10 +1652,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.download_vosk:
         download_vosk_model(args.model)
         return 0
-    if not args.sim and args.audio != "seeed":
+    if not args.sim and args.audio in {"bt", "bluetooth"}:
         connected = connect_bluetooth_speaker(args.bt_mac)
-        if not connected and args.audio == "auto":
-            print("没有蓝牙音箱，音乐走 ReSpeaker。配对后执行 --bt-connect")
+        if not connected:
+            print("没有蓝牙音箱，不使用 HDMI。可改回灯上喇叭：--audio seeed")
     lamp = LocalLamp(
         sim=args.sim,
         port=args.port,
