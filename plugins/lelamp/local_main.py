@@ -521,11 +521,32 @@ def pick_random_track(folder: Optional[Path] = None) -> Tuple[Path, int]:
     return path, bpm_from_name(path) or 120
 
 
+def parse_alsa_playback(listing: str) -> Tuple[Optional[str], Optional[str]]:
+    """Return (pcm name, card index) for the ReSpeaker/seeed card."""
+    for line in listing.splitlines():
+        low = line.lower()
+        if not low.startswith("card "):
+            continue
+        if not any(tag in low for tag in ("seeed", "respeaker", "voicecard", "array")):
+            continue
+        try:
+            card = line.split(":", 1)[0].split()[1]
+        except (IndexError, ValueError):
+            continue
+        return f"plughw:{card},0", card
+    return None, None
+
+
 def find_alsa_playback_device() -> Optional[str]:
+    device, _card = find_alsa_playback()
+    return device
+
+
+def find_alsa_playback() -> Tuple[Optional[str], Optional[str]]:
     """Prefer the ReSpeaker/seeed speaker over HDMI."""
     aplay = _bin("aplay")
     if not aplay:
-        return None
+        return None, None
     try:
         listing = subprocess.check_output(
             [aplay, "-l"],
@@ -534,26 +555,43 @@ def find_alsa_playback_device() -> Optional[str]:
             timeout=3,
         )
     except Exception:
-        return None
-    for line in listing.splitlines():
-        low = line.lower()
-        if not low.startswith("card "):
-            continue
-        if not any(tag in low for tag in ("seeed", "respeaker", "voicecard", "array")):
-            continue
-        try:
-            card = int(line.split(":", 1)[0].split()[1])
-        except (IndexError, ValueError):
-            continue
-        return f"plughw:{card},0"
-    return None
+        return None, None
+    return parse_alsa_playback(listing)
 
 
-def _player_env(device: Optional[str]) -> Dict[str, str]:
+def unmute_alsa_card(card: Optional[str]) -> None:
+    amixer = _bin("amixer")
+    if not amixer or card is None or card == "":
+        return
+    for control in (
+        "Speaker",
+        "Playback",
+        "PCM",
+        "Digital",
+        "Headphone",
+        "DAC",
+        "Master",
+        "Lineout",
+    ):
+        subprocess.run(
+            [amixer, "-c", str(card), "sset", control, "90%", "unmute"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+
+
+def _player_env(device: Optional[str], card: Optional[str] = None) -> Dict[str, str]:
     env = os.environ.copy()
+    env["SDL_AUDIODRIVER"] = "alsa"
     if device:
         env["AUDIODEV"] = device
-        env.setdefault("SDL_AUDIODRIVER", "alsa")
+        env["SDL_AUDIO_DEVICE_NAME"] = device
+    if card:
+        env["ALSA_CARD"] = str(card)
+        env["ALSA_PCM_CARD"] = str(card)
+        env["ALSA_PCM_DEVICE"] = "0"
     return env
 
 
@@ -601,6 +639,16 @@ def music_player_commands(path: Path, *, device: Optional[str] = None) -> List[L
     cvlc = _bin("cvlc") or _bin("vlc")
     if cvlc:
         add(cvlc, ["--play-and-exit", "--intf", "dummy", "--quiet", path_s])
+
+    gst_launch = _bin("gst-launch-1.0")
+    if gst_launch:
+        sink = ["alsasink"]
+        if device:
+            sink.extend([f"device={device}"])
+        add(
+            gst_launch,
+            ["-q", "filesrc", f"location={path_s}", "!", "decodebin", "!", "audioconvert", "!", "audioresample", "!", *sink],
+        )
 
     if ffmpeg:
         alsa_out = device or "default"
@@ -691,18 +739,55 @@ def _spawn_ffmpeg_aplay(path: Path, *, device: Optional[str], env: Dict[str, str
     return play
 
 
-def _spawn_pygame_player(path: Path, *, env: Dict[str, str]) -> Optional["subprocess.Popen[bytes]"]:
-    script = (
-        "import sys, time\n"
-        "path = sys.argv[1]\n"
-        "import pygame\n"
-        "pygame.mixer.init()\n"
-        "pygame.mixer.music.load(path)\n"
-        "pygame.mixer.music.play()\n"
-        "while pygame.mixer.music.get_busy():\n"
-        "    time.sleep(0.15)\n"
-    )
-    return _spawn_player([sys.executable, "-c", script, str(path)], env=env)
+def _spawn_pygame_player(
+    path: Path,
+    *,
+    device: Optional[str],
+    card: Optional[str],
+    env: Dict[str, str],
+) -> Optional["subprocess.Popen[bytes]"]:
+    script = r"""
+import os, sys, time
+path = sys.argv[1]
+device = sys.argv[2]
+card = sys.argv[3]
+os.environ["SDL_AUDIODRIVER"] = "alsa"
+if device:
+    os.environ["AUDIODEV"] = device
+    os.environ["SDL_AUDIO_DEVICE_NAME"] = device
+if card:
+    os.environ["ALSA_CARD"] = card
+    os.environ["ALSA_PCM_CARD"] = card
+    os.environ["ALSA_PCM_DEVICE"] = "0"
+import pygame
+try:
+    if device:
+        pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=2048, devicename=device)
+    else:
+        pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=2048)
+except TypeError:
+    pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=2048)
+pygame.mixer.music.set_volume(1.0)
+pygame.mixer.music.load(path)
+pygame.mixer.music.play()
+sys.stderr.write("pygame device=%s mixer=%s\n" % (device or "default", pygame.mixer.get_init()))
+while pygame.mixer.music.get_busy():
+    time.sleep(0.15)
+"""
+    argv = [sys.executable, "-c", script, str(path), device or "", card or ""]
+    try:
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+    except OSError:
+        return None
+    time.sleep(0.35)
+    if proc.poll() is not None:
+        return None
+    return proc
 
 
 def _stop_process(proc: Optional["subprocess.Popen[bytes]"]) -> None:
@@ -732,8 +817,11 @@ def _stop_process(proc: Optional["subprocess.Popen[bytes]"]) -> None:
 
 
 def start_music_player(path: Path) -> Optional["subprocess.Popen[bytes]"]:
-    device = find_alsa_playback_device()
-    env = _player_env(device)
+    device, card = find_alsa_playback()
+    unmute_alsa_card(card)
+    env = _player_env(device, card)
+    if device:
+        print(f"喇叭 {device}")
     for argv in music_player_commands(path, device=device):
         proc = _spawn_player(argv, env=env)
         if proc is not None:
@@ -743,9 +831,9 @@ def start_music_player(path: Path) -> Optional["subprocess.Popen[bytes]"]:
     if piped is not None:
         print("player ffmpeg|aplay")
         return piped
-    pygame_proc = _spawn_pygame_player(path, env=env)
+    pygame_proc = _spawn_pygame_player(path, device=device, card=card, env=env)
     if pygame_proc is not None:
-        print("player pygame")
+        print(f"player pygame {device or 'default'}")
         return pygame_proc
     return None
 
@@ -832,6 +920,7 @@ def vosk_listen_worker(
     *,
     device: Optional[int],
     model_path: Path,
+    mic_hold: Optional[threading.Event] = None,
 ) -> None:
     os.environ.setdefault("VOSK_LOG_LEVEL", "0")
     try:
@@ -880,6 +969,21 @@ def vosk_listen_worker(
             out_q.put("__ready__")
             last_partial = ""
             while not stop.is_set():
+                if mic_hold is not None and mic_hold.is_set():
+                    try:
+                        stream.stop()
+                    except Exception:
+                        pass
+                    print("麦克风让出喇叭")
+                    while mic_hold.is_set() and not stop.is_set():
+                        time.sleep(0.05)
+                    try:
+                        stream.start()
+                        print("麦克风收回")
+                    except Exception as exc:
+                        print(f"麦克风收回失败: {exc}")
+                    last_partial = ""
+                    continue
                 data, _overflow = stream.read(4000)
                 chunk = _downmix_pcm16(bytes(data), channels)
                 if rec.AcceptWaveform(chunk):
@@ -940,7 +1044,13 @@ def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path)
     out_q: "queue.Queue[str]" = queue.Queue()
     worker = threading.Thread(
         target=vosk_listen_worker,
-        kwargs={"out_q": out_q, "stop": stop, "device": device, "model_path": model_path},
+        kwargs={
+            "out_q": out_q,
+            "stop": stop,
+            "device": device,
+            "model_path": model_path,
+            "mic_hold": lamp.mic_hold,
+        },
         daemon=True,
     )
     worker.start()
@@ -1006,6 +1116,7 @@ class LocalLamp:
         self._music_stop = threading.Event()
         self._dance_thread = None
         self._music_playing = False
+        self.mic_hold = threading.Event()
 
     def start(self) -> None:
         folder = ensure_music_dir()
@@ -1093,6 +1204,17 @@ class LocalLamp:
             if proc is not None and proc.poll() is not None:
                 break
         self._music_playing = False
+        self._release_mic()
+
+    def _hold_mic(self) -> None:
+        self.mic_hold.set()
+        time.sleep(0.4)
+        print("喇叭占用声卡")
+
+    def _release_mic(self) -> None:
+        if self.mic_hold.is_set():
+            self.mic_hold.clear()
+            print("喇叭还声卡")
 
     def play_music(self) -> str:
         self.stop_music()
@@ -1110,11 +1232,13 @@ class LocalLamp:
         if self.sim:
             self._dance_step(0)
             return f"music {path.name}"
+        self._hold_mic()
         proc = start_music_player(path)
         self._music_proc = proc
         if proc is None:
             print("没有播放器。mp3 需要 mpg123 或 ffmpeg。在 Pi 上执行：")
             print("  sudo apt install -y mpg123 ffmpeg")
+            self._release_mic()
         self._dance_thread = threading.Thread(
             target=self._dance_loop,
             args=(bpm,),
@@ -1135,6 +1259,7 @@ class LocalLamp:
             thread.join(timeout=2.5)
         was = self._music_playing or bool(self.last_music)
         self._music_playing = False
+        self._release_mic()
         if was:
             print("music stop")
         return "停了。"

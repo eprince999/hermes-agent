@@ -266,3 +266,17 @@ def test_downmix_stereo_pcm_to_mono():
     mono.frombytes(_downmix_pcm16(stereo.tobytes(), 2))
     assert list(mono) == [2000, 0]
     assert _downmix_pcm16(b"\x01\x00", 1) == b"\x01\x00"
+
+
+def test_parse_seeed_aplay_listing():
+    from plugins.lelamp.local_main import parse_alsa_playback
+
+    listing = (
+        "**** List of PLAYBACK Hardware Devices ****\n"
+        "card 0: seeed2micvoicec [seeed-2mic-voicecard], device 0: "
+        "bcm2835-i2s-tlv320aic3x-hifi tlv320aic3x-hifi-0 []\n"
+        "  Subdevices: 1/1\n"
+    )
+    device, card = parse_alsa_playback(listing)
+    assert card == "0"
+    assert device == "plughw:0,0"
