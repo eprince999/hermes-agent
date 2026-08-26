@@ -111,7 +111,9 @@ def test_extract_spoken_command_from_padded_asr():
     assert extract_spoken_command("今天天气怎么样") is None
     assert extract_spoken_command("不要关灯") == "不要"
     assert extract_spoken_command("请点头") == "点头"
-    assert extract_spoken_command("放音乐吧") == "放音乐"
+    spoken = extract_spoken_command("放音乐吧")
+    assert spoken
+    assert parse_line(spoken).kind == "music"
 
 
 def test_bare_music_word_is_a_command():
@@ -176,7 +178,9 @@ def test_music_command_plays_from_folder(tmp_path, monkeypatch, capsys):
     assert parse_line("音乐").kind == "music"
     assert parse_line("放音乐").kind == "music"
     assert parse_line("停止音乐").kind == "music_stop"
-    assert extract_spoken_command("请放音乐") == "放音乐"
+    spoken = extract_spoken_command("请放音乐")
+    assert spoken
+    assert parse_line(spoken).kind == "music"
 
     song = tmp_path / "desk_tune_96.wav"
     write_beat_wav(song, bpm=96, notes=(0, 4, 7), seconds=0.3)
