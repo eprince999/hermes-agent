@@ -796,6 +796,36 @@ def find_input_device(preferred: Optional[int] = None):
     return default
 
 
+def _input_channel_count(index: int) -> int:
+    import sounddevice as sd
+
+    try:
+        info = sd.query_devices(index)
+    except Exception:
+        return 1
+    n = int(info.get("max_input_channels") or 1)
+    if n >= 2:
+        return 2
+    return 1 if n >= 1 else 1
+
+
+def _downmix_pcm16(data: bytes, channels: int) -> bytes:
+    """Vosk wants mono s16le. ReSpeaker capture is often 2ch."""
+    raw = bytes(data)
+    if channels <= 1 or not raw:
+        return raw
+    import array
+
+    frame = 2 * channels
+    usable = raw[: len(raw) - (len(raw) % frame)]
+    samples = array.array("h")
+    samples.frombytes(usable)
+    mono = array.array("h")
+    for i in range(0, len(samples), channels):
+        mono.append(int(sum(samples[i : i + channels]) / channels))
+    return mono.tobytes()
+
+
 def vosk_listen_worker(
     out_q: "queue.Queue[str]",
     stop: threading.Event,
@@ -803,6 +833,7 @@ def vosk_listen_worker(
     device: Optional[int],
     model_path: Path,
 ) -> None:
+    os.environ.setdefault("VOSK_LOG_LEVEL", "0")
     try:
         import sounddevice as sd
         import vosk
@@ -817,18 +848,40 @@ def vosk_listen_worker(
         rec = vosk.KaldiRecognizer(model, 16000)
         rec.SetWords(True)
         index = find_input_device(device)
-        with sd.RawInputStream(
-            samplerate=16000,
-            blocksize=8000,
-            device=index,
-            dtype="int16",
-            channels=1,
-        ) as stream:
+        wanted = _input_channel_count(index)
+        stream = None
+        channels = wanted
+        last_exc: Optional[BaseException] = None
+        seen_channels = set()
+        for channels in (wanted, 1, 2):
+            if channels in seen_channels:
+                continue
+            seen_channels.add(channels)
+            print(f"打开麦克风 index={index} channels={channels} rate=16000 …")
+            try:
+                stream = sd.RawInputStream(
+                    samplerate=16000,
+                    blocksize=4000,
+                    device=index,
+                    dtype="int16",
+                    channels=channels,
+                )
+                stream.start()
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                print(f"channels={channels} 打不开: {exc}")
+                stream = None
+        if stream is None:
+            raise last_exc or RuntimeError("麦克风打不开")
+        try:
+            print("麦克风流已开")
             out_q.put("__ready__")
             last_partial = ""
             while not stop.is_set():
-                data, _overflow = stream.read(8000)
-                chunk = bytes(data)
+                data, _overflow = stream.read(4000)
+                chunk = _downmix_pcm16(bytes(data), channels)
                 if rec.AcceptWaveform(chunk):
                     payload = json.loads(rec.Result())
                     text = (payload.get("text") or "").strip()
@@ -841,6 +894,15 @@ def vosk_listen_worker(
                     if partial and partial != last_partial:
                         last_partial = partial
                         out_q.put(f"__partial__ {partial}")
+        finally:
+            try:
+                stream.stop()
+            except Exception:
+                pass
+            try:
+                stream.close()
+            except Exception:
+                pass
     except Exception as exc:
         out_q.put(f"__error__ 麦克风失败: {exc}")
 

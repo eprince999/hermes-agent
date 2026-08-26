@@ -255,3 +255,14 @@ def test_music_rgb_pulse_does_not_play_recordings():
     lamp._dance_step(2)
     assert lamp.last_expression == "wake_up"
     assert lamp.last_rgb != (0, 0, 0)
+
+
+def test_downmix_stereo_pcm_to_mono():
+    from plugins.lelamp.local_main import _downmix_pcm16
+    import array
+
+    stereo = array.array("h", [1000, 3000, -2000, 2000])
+    mono = array.array("h")
+    mono.frombytes(_downmix_pcm16(stereo.tobytes(), 2))
+    assert list(mono) == [2000, 0]
+    assert _downmix_pcm16(b"\x01\x00", 1) == b"\x01\x00"
