@@ -18,6 +18,7 @@ Keep official ``main.py`` untouched. From the runtime repo root:
 
 Type Chinese commands, or with ``--listen`` speak them to the ReSpeaker.
 Say 音乐 to play a random file from the music/ folder. Say 下一首 to skip.
+Say 大点声 / 小点声 for volume, 循环播放 or 单曲循环 while a song plays.
 While a song plays, the RGB ring does a soft music-box wash (warm highs,
 cool lows) and the motors stay still. ``q`` or Ctrl+C quits.
 Music plays on the lamp ReSpeaker speaker by default (never HDMI).
@@ -203,6 +204,18 @@ MUSIC_NEXT = {
     "下一首", "换一首", "下一曲", "切歌", "换歌", "下一首歌", "换首歌",
     "next", "next song", "skip",
 }
+MUSIC_VOL_UP = {
+    "大点声", "大声点", "大一点声", "声音大点", "音量高", "音量大", "大声一点",
+}
+MUSIC_VOL_DOWN = {
+    "小点声", "小声点", "小一点声", "声音小点", "音量低", "音量小", "小声一点",
+}
+MUSIC_LOOP_ALL = {
+    "循环播放", "列表循环", "全部循环", "循环列表",
+}
+MUSIC_LOOP_ONE = {
+    "单曲循环", "单曲重复", "这一首循环", "重复这一首",
+}
 _BUILTIN_TRACKS = (
     ("pulse_100.wav", 100, (0, 3, 7, 10)),
     ("bounce_120.wav", 120, (0, 4, 7, 12)),
@@ -212,7 +225,7 @@ _BUILTIN_TRACKS = (
 HELP_TEXT = """本地台灯 Stage 2（无 OpenAI）
 动作：你好 / 点头 / 摇头 / 好奇 / 张望 / 开心 / 兴奋 / 惊讶 / 害羞 / 难过 / 待机
 灯光：开灯 / 关灯 / 暖光 / 冷光 / 自动 / 亮一点 / 暗一点
-音乐：音乐 / 放音乐（随机播放 music/ 文件夹）  下一首  停止音乐
+音乐：音乐 / 下一首 / 停止音乐 / 大点声 / 小点声 / 循环播放 / 单曲循环
 说话：启动时加 --listen（先 --download-vosk）
 其它：status  rgb 255 176 80  help  q
 """
@@ -332,6 +345,14 @@ def parse_line(line: str) -> Command:
         return Command("music_next", None, "下一首。")
     if music_kind == "music_stop":
         return Command("music_stop", None, "停了。")
+    if music_kind == "volume_up":
+        return Command("volume_delta", 15, "大点声。")
+    if music_kind == "volume_down":
+        return Command("volume_delta", -15, "小点声。")
+    if music_kind == "loop_all":
+        return Command("music_loop", "all", "循环播放。")
+    if music_kind == "loop_one":
+        return Command("music_loop", "one", "单曲循环。")
 
     parts = text.split()
     if parts[0].lower() == "volume" and len(parts) == 2 and parts[1].isdigit():
@@ -364,7 +385,7 @@ def parse_line(line: str) -> Command:
         return Command(
             "unknown",
             text,
-            "我还没学会这句。可以说：你好、点头、暖光、关灯、音乐、下一首。输入 help 看全部。",
+            "我还没学会这句。可以说：你好、点头、暖光、关灯、音乐、下一首、大点声。输入 help 看全部。",
         )
     spoken = {
         "wake_up": "你好呀，我是台灯。",
@@ -383,7 +404,11 @@ def parse_line(line: str) -> Command:
 
 
 def command_phrases() -> List[str]:
-    extra = ("亮一点", "亮一些", "亮点", "暗一点", "暗一些", "暗点", "最亮", "最暗", "帮助", "退出")
+    extra = (
+        "亮一点", "亮一些", "亮点", "暗一点", "暗一些", "暗点", "最亮", "最暗",
+        "帮助", "退出",
+        "大点声", "小点声", "循环播放", "单曲循环",
+    )
     phrases = (
         set(LIGHT_ONLY)
         | set(ALIASES)
@@ -391,6 +416,10 @@ def command_phrases() -> List[str]:
         | set(MUSIC_START)
         | set(MUSIC_STOP)
         | set(MUSIC_NEXT)
+        | set(MUSIC_VOL_UP)
+        | set(MUSIC_VOL_DOWN)
+        | set(MUSIC_LOOP_ALL)
+        | set(MUSIC_LOOP_ONE)
         | set(extra)
     )
     return sorted(phrases, key=lambda item: (-len(item), item))
@@ -418,23 +447,33 @@ def _compact_speech(transcript: str) -> str:
     return text
 
 
+def _phrase_in_blobs(phrases: set, blobs: Tuple[str, ...]) -> bool:
+    for phrase in sorted(phrases, key=len, reverse=True):
+        needle = _compact_speech(phrase).lower()
+        if needle and any(needle in blob for blob in blobs):
+            return True
+    return False
+
+
 def _music_kind(transcript: str) -> Optional[str]:
-    """Return music / music_next / music_stop if the transcript names a song command."""
+    """Return a music command kind if the transcript names one."""
     compact = _compact_speech(transcript)
     low = compact.lower()
     blobs = (compact, low, (transcript or "").strip().lower())
-    for phrase in sorted(MUSIC_STOP, key=len, reverse=True):
-        needle = _compact_speech(phrase).lower()
-        if needle and any(needle in blob for blob in blobs):
-            return "music_stop"
-    for phrase in sorted(MUSIC_NEXT, key=len, reverse=True):
-        needle = _compact_speech(phrase).lower()
-        if needle and any(needle in blob for blob in blobs):
-            return "music_next"
-    for phrase in sorted(MUSIC_START, key=len, reverse=True):
-        needle = _compact_speech(phrase).lower()
-        if needle and any(needle in blob for blob in blobs):
-            return "music"
+    if _phrase_in_blobs(MUSIC_STOP, blobs):
+        return "music_stop"
+    if _phrase_in_blobs(MUSIC_NEXT, blobs):
+        return "music_next"
+    if _phrase_in_blobs(MUSIC_LOOP_ONE, blobs):
+        return "loop_one"
+    if _phrase_in_blobs(MUSIC_LOOP_ALL, blobs):
+        return "loop_all"
+    if _phrase_in_blobs(MUSIC_VOL_UP, blobs):
+        return "volume_up"
+    if _phrase_in_blobs(MUSIC_VOL_DOWN, blobs):
+        return "volume_down"
+    if _phrase_in_blobs(MUSIC_START, blobs):
+        return "music"
     if "音乐" in compact:
         return "music"
     return None
@@ -788,10 +827,11 @@ def find_alsa_playback() -> Tuple[Optional[str], Optional[str]]:
     return parse_alsa_playback(listing)
 
 
-def unmute_alsa_card(card: Optional[str]) -> None:
+def set_alsa_playback_volume(card: Optional[str], percent: int) -> None:
     amixer = _bin("amixer")
     if not amixer or card is None or card == "":
         return
+    pct = f"{max(0, min(100, int(percent)))}%"
     for control in (
         "Speaker",
         "Playback",
@@ -803,12 +843,44 @@ def unmute_alsa_card(card: Optional[str]) -> None:
         "Lineout",
     ):
         subprocess.run(
-            [amixer, "-c", str(card), "sset", control, "90%", "unmute"],
+            [amixer, "-c", str(card), "sset", control, pct, "unmute"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=2,
             check=False,
         )
+
+
+def unmute_alsa_card(card: Optional[str]) -> None:
+    set_alsa_playback_volume(card, 90)
+
+
+_LAST_PLAYBACK: Dict[str, Optional[str]] = {"device": None, "card": None, "backend": "alsa"}
+
+
+def remember_playback(device: Optional[str], card: Optional[str], backend: str) -> None:
+    _LAST_PLAYBACK["device"] = device
+    _LAST_PLAYBACK["card"] = card
+    _LAST_PLAYBACK["backend"] = backend
+
+
+def apply_playback_volume(percent: int) -> None:
+    """Live volume via ALSA mixer or Pulse sink. Never touches HDMI."""
+    percent = max(0, min(100, int(percent)))
+    backend = (_LAST_PLAYBACK.get("backend") or "alsa")
+    device = _LAST_PLAYBACK.get("device")
+    card = _LAST_PLAYBACK.get("card")
+    if backend == "pulse" and device:
+        pactl = _bin("pactl")
+        if pactl:
+            _run_text([pactl, "set-sink-volume", device, f"{percent}%"], timeout=3)
+            _run_text([pactl, "set-sink-mute", device, "0"], timeout=3)
+            return
+    if not card:
+        _device, card = find_alsa_playback()
+        if _device:
+            remember_playback(_device, card, "alsa")
+    set_alsa_playback_volume(card, percent)
 
 
 def _pulse_server() -> Optional[str]:
@@ -1136,13 +1208,14 @@ def choose_playback(*, prefer: Optional[str] = None) -> Tuple[Optional[str], Opt
             device, card, backend = find_bluetooth_playback()
         if device:
             print(f"喇叭 蓝牙 {device}")
+            remember_playback(device, card, backend)
             return device, card, backend
         print("没有蓝牙音箱，不使用 HDMI。")
         return None, None, "alsa"
     device, card = find_alsa_playback()
     if device:
-        unmute_alsa_card(card)
         print(f"喇叭 ReSpeaker {device}")
+        remember_playback(device, card, "alsa")
         return device, card, "alsa"
     print("没有 ReSpeaker 喇叭。不会使用 HDMI。")
     return None, None, "alsa"
@@ -1155,12 +1228,13 @@ def print_mpg123_install_hint() -> None:
     print("  sudo apt install -y mpg123")
 
 
-def start_music_player(path: Path) -> Optional["subprocess.Popen[bytes]"]:
+def start_music_player(path: Path, *, volume: int = 85) -> Optional["subprocess.Popen[bytes]"]:
     device, card, backend = choose_playback()
     env = _player_env(device, card, backend=backend)
     if not device:
         print("没有 ReSpeaker 喇叭。不会使用 HDMI。")
         return None
+    apply_playback_volume(volume)
     for argv in music_player_commands(path, device=device, backend=backend):
         proc = _spawn_player(argv, env=env)
         if proc is not None:
@@ -1370,7 +1444,15 @@ def apply_speech(lamp: LocalLamp, transcript: str) -> str:
     phrase = extract_spoken_command(transcript)
     raw = phrase or compact or (transcript or "").strip()
     cmd = parse_line(raw)
-    if lamp.music_playing and cmd.kind not in {"music_stop", "quit", "music", "music_next"}:
+    if lamp.music_playing and cmd.kind not in {
+        "music_stop",
+        "quit",
+        "music",
+        "music_next",
+        "volume_delta",
+        "volume",
+        "music_loop",
+    }:
         print("正在放歌")
         return "busy"
     if cmd.kind in {"unknown", "noop"}:
@@ -1396,8 +1478,8 @@ def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path)
         daemon=True,
     )
     worker.start()
-    print("麦克风线程已开。请说：你好、点头、关灯、音乐、下一首。打字回车也可以。")
-    print("音乐指令已开：听到「音乐」播放，「下一首」切歌。放歌时灯做渐变，电机不动。")
+    print("麦克风线程已开。请说：你好、点头、关灯、音乐、下一首、大点声。打字回车也可以。")
+    print("音乐：音乐 / 下一首 / 大点声 / 小点声 / 循环播放 / 单曲循环 / 停止音乐。")
     try:
         while True:
             try:
@@ -1462,6 +1544,8 @@ class LocalLamp:
         self._playlist_index = 0
         self._viz_rgb: Optional[Tuple[int, int, int]] = None
         self._pre_music_rgb: Tuple[int, int, int] = MOOD_RGB["warm"]
+        self.music_volume = 85
+        self._loop_mode = "all"
         self.mic_hold = threading.Event()
 
     def start(self) -> None:
@@ -1556,10 +1640,34 @@ class LocalLamp:
             self._paint_rgb(self._viz_rgb, quiet=True)
             proc = self._music_proc
             if proc is not None and proc.poll() is not None:
-                break
+                nxt = self._continue_after_track()
+                if nxt is None or self._music_stop.is_set():
+                    break
+                path, bpm = nxt
+                hue_shift = random.random()
+                t0 = time.monotonic()
+                self.last_music = path.name
+                print(f"music {path.name} bpm={bpm}")
+                started = start_music_player(path, volume=self.music_volume)
+                self._music_proc = started
+                if started is None:
+                    break
+                continue
             time.sleep(0.04)
         self._music_playing = False
         self._release_mic()
+
+    def _continue_after_track(self) -> Optional[Tuple[Path, int]]:
+        if not self._playlist:
+            return None
+        if self._loop_mode == "one":
+            path = self._playlist[self._playlist_index % len(self._playlist)]
+            return path, bpm_from_name(path) or 120
+        if self._loop_mode == "all":
+            self._playlist_index = (self._playlist_index + 1) % len(self._playlist)
+            path = self._playlist[self._playlist_index]
+            return path, bpm_from_name(path) or 120
+        return None
 
     def _hold_mic(self) -> None:
         self.mic_hold.set()
@@ -1586,14 +1694,14 @@ class LocalLamp:
         self.last_music = path.name
         self._pre_music_rgb = self.base_rgb
         wash = music_viz_color(t=0.0, bpm=bpm, hue_shift=hue_shift)
-        print(f"music {path.name} bpm={bpm}")
+        print(f"music {path.name} bpm={bpm} vol={self.music_volume} loop={self._loop_mode}")
         self._music_stop.clear()
         self._music_playing = True
         self._paint_rgb(wash, quiet=self.sim)
         if self.sim:
             return f"music {path.name}"
         self._hold_mic()
-        proc = start_music_player(path)
+        proc = start_music_player(path, volume=self.music_volume)
         self._music_proc = proc
         if proc is None:
             print_mpg123_install_hint()
@@ -1648,7 +1756,8 @@ class LocalLamp:
             return (
                 f"sim={self.sim} expression={self.last_expression or '-'} "
                 f"rgb={self.last_rgb} brightness={self.brightness} "
-                f"music={self.last_music or '-'}"
+                f"music={self.last_music or '-'} volume={self.music_volume} "
+                f"loop={self._loop_mode}"
             )
         if cmd.kind == "music":
             return self.play_music()
@@ -1656,6 +1765,12 @@ class LocalLamp:
             return self.next_music()
         if cmd.kind == "music_stop":
             return self.stop_music()
+        if cmd.kind == "volume_delta":
+            return self.adjust_volume(int(cmd.payload))
+        if cmd.kind == "volume":
+            return self.set_volume(int(cmd.payload))
+        if cmd.kind == "music_loop":
+            return self.set_loop_mode(str(cmd.payload))
         if cmd.kind == "express":
             rec = str(cmd.payload)
             self._play(rec)
@@ -1681,9 +1796,27 @@ class LocalLamp:
             assert isinstance(rgb, tuple)
             self._apply_rgb((int(rgb[0]), int(rgb[1]), int(rgb[2])))
             return cmd.reply
-        if cmd.kind == "volume":
-            return cmd.reply + "（Stage 1 还没接管喇叭，先记下。）"
         return cmd.reply
+
+    def set_volume(self, percent: int) -> str:
+        self.music_volume = max(0, min(100, int(percent)))
+        if not self.sim:
+            apply_playback_volume(self.music_volume)
+        print(f"volume {self.music_volume}%")
+        return f"音量 {self.music_volume}%"
+
+    def adjust_volume(self, delta: int) -> str:
+        return self.set_volume(self.music_volume + int(delta))
+
+    def set_loop_mode(self, mode: str) -> str:
+        key = (mode or "").strip().lower()
+        if key in {"one", "single", "track"}:
+            self._loop_mode = "one"
+            print("loop one")
+            return "单曲循环。"
+        self._loop_mode = "all"
+        print("loop all")
+        return "循环播放。"
 
     def wake(self) -> None:
         mood, bri = circadian_mood()

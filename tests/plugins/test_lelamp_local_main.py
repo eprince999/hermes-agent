@@ -124,6 +124,12 @@ def test_bare_music_word_is_a_command():
     assert extract_spoken_command("音乐") == "音乐"
     assert extract_spoken_command("音 乐") == "音乐"
     assert extract_spoken_command("下一首") == "下一首"
+    assert parse_line("大点声").kind == "volume_delta"
+    assert parse_line("小点声").kind == "volume_delta"
+    assert parse_line("循环播放").kind == "music_loop"
+    assert parse_line("循环播放").payload == "all"
+    assert parse_line("单曲循环").kind == "music_loop"
+    assert parse_line("单曲循环").payload == "one"
 
 
 def test_show_stage_prints_current_stage(capsys):
@@ -314,6 +320,59 @@ def test_next_song_command_skips_current_track(tmp_path, monkeypatch):
     assert apply_speech(lamp, "下一首") == "music_next"
     assert lamp.last_music == "b_120.wav"
     assert lamp.music_playing is True
+
+
+def test_volume_and_loop_commands_work_while_playing(tmp_path, monkeypatch):
+    monkeypatch.setenv("LELAMP_MUSIC_DIR", str(tmp_path))
+    song = tmp_path / "desk_tune_96.wav"
+    write_beat_wav(song, bpm=96, notes=(0, 4, 7), seconds=0.2)
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    lamp.apply(parse_line("音乐"))
+    assert lamp.music_volume == 85
+    assert lamp._loop_mode == "all"
+    assert apply_speech(lamp, "大点声") == "volume_delta"
+    assert lamp.music_volume == 100
+    assert apply_speech(lamp, "小点声") == "volume_delta"
+    assert lamp.music_volume == 85
+    assert apply_speech(lamp, "单曲循环") == "music_loop"
+    assert lamp._loop_mode == "one"
+    assert apply_speech(lamp, "循环播放") == "music_loop"
+    assert lamp._loop_mode == "all"
+    assert lamp.music_playing is True
+    spoken = extract_spoken_command("请大点声")
+    assert spoken
+    assert parse_line(spoken).kind == "volume_delta"
+
+
+def test_continue_after_track_respects_loop_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("LELAMP_MUSIC_DIR", str(tmp_path))
+    first = tmp_path / "a_100.wav"
+    second = tmp_path / "b_120.wav"
+    write_beat_wav(first, bpm=100, notes=(0, 4, 7), seconds=0.2)
+    write_beat_wav(second, bpm=120, notes=(0, 4, 7), seconds=0.2)
+    monkeypatch.setattr("plugins.lelamp.local_main.random.shuffle", lambda items: items.sort(key=lambda p: p.name))
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    lamp.apply(parse_line("音乐"))
+    lamp.set_loop_mode("one")
+    same, bpm = lamp._continue_after_track()
+    assert same.name == "a_100.wav"
+    assert bpm == 100
+    lamp.set_loop_mode("all")
+    nxt, nxt_bpm = lamp._continue_after_track()
+    assert nxt.name == "b_120.wav"
+    assert nxt_bpm == 120
 
 
 def test_music_viz_warm_highs_cool_lows():
