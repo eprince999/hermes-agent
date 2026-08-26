@@ -44,11 +44,13 @@ LeLamp is a 5V lamp. Use the 5V 2A supplies from the assembly guide.
 
 If the lamp is already assembled, copy `plugins/lelamp/local_main.py` to `~/lelamp_runtime/local_main.py`.
 
-Keep the runnable name `local_main.py`. After a stage works, run `sudo uv run python local_main.py --snapshot` (saves `lamp_snapshots/stage2.py`) or copy the file yourself. Rollback by copying that snapshot back. Do not invent `local_main_v2.py` as the launcher.
+Keep the runnable name `local_main.py`. After a stage works, run `sudo uv run python local_main.py --snapshot` or copy into `lamp_snapshots/`. Do not invent `local_main_v2.py` as the launcher.
 
 Stage 1 (keyboard, no cloud): `sudo uv run python local_main.py`. Type `你好` / `点头` / `暖光` / `关灯`. `--sim` prints actions without servos.
 
-Stage 2 (ReSpeaker keywords, still no OpenAI): `uv add vosk`, then `sudo uv run python local_main.py --download-vosk`, then `sudo uv run python local_main.py --listen`. Test mapping without the mic via `--say 请关灯`.
+Stage 2 (ReSpeaker keywords): `uv add vosk`, then `--download-vosk` and `--listen`. Mapping without a mic: `--say 请关灯`.
+
+Stage 3 (Cursor API brain): put `CURSOR_API_KEY=crsr_...` in `~/lelamp_runtime/.env` (key from https://cursor.com/dashboard/api). `uv add cursor-sdk`, then `sudo uv run python local_main.py --sim --ask "把灯调成暖光并点点头"`. Keywords still run locally; other sentences go to Cursor. This is cursor-sdk (local custom tools), not a DeepSeek/OpenAI chat URL.
 
 The LiveKit + OpenAI Realtime path is optional later: copy `plugins/lelamp/runtime_main.py` over `~/lelamp_runtime/main.py`, put `OPENAI_API_KEY` in `.env`, then `sudo uv run main.py console`.
 
@@ -100,7 +102,7 @@ Official recordings: `wake_up`, `nod`, `headshake`, `curious`, `scanning`, `exci
 - Do not fully spin the base yaw or head yaw past about ±90° from center during calibration.
 - Pi Zero 2W cannot run the LLM locally. `main.py` uses OpenAI Realtime in the cloud; the Pi only does mic, speaker, servos, and LEDs. Put `OPENAI_API_KEY` in `~/lelamp_runtime/.env`. `sudo` drops shell exports; a missing key crashes at `RealtimeModel`.
 - One Raspberry Pi should run only this lamp's runtime while you talk to it.
-- Stage 2 speech uses offline Vosk, not OpenAI. Speak one short command and pause. Filler like `嗯` maps to nod.
+- Stage 3 uses `CURSOR_API_KEY` + `cursor-sdk` local agents with custom lamp tools. Cloud Agents cannot move Pi GPIO. There is no public Cursor `/v1/chat/completions`.
 
 ## Verification
 

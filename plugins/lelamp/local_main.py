@@ -1,33 +1,26 @@
-"""LeLamp local agent — Stages 1–2, no OpenAI, no LiveKit.
+"""LeLamp local agent — Stages 1–3, no OpenAI, no LiveKit.
 
 Always copy onto the Pi as ``~/lelamp_runtime/local_main.py``.
 Do not rename the runnable file per stage. Snapshot instead::
 
     mkdir -p ~/lelamp_runtime/lamp_snapshots
-    cp local_main.py lamp_snapshots/stage1-keyboard.py   # after a good test
-    git add local_main.py && git commit -m "lamp: stage 1 ok"
-
-Rollback::
-
-    cp lamp_snapshots/stage1-keyboard.py local_main.py
+    cp local_main.py lamp_snapshots/stage2.py
 
 Keep official ``main.py`` untouched. From the runtime repo root:
 
     sudo uv run python local_main.py
-    sudo uv run python local_main.py --sim
-    sudo uv run python local_main.py --say 你好 --say 关灯
-    sudo uv run python local_main.py --download-vosk
     sudo uv run python local_main.py --listen
-    sudo uv run python local_main.py --snapshot          # save as lamp_snapshots/stage2.py
-    sudo uv run python local_main.py --snapshot stage2
+    sudo uv run python local_main.py --ask "把灯调成暖光并点点头"
+    sudo uv run python local_main.py --snapshot
 
-Type Chinese commands, or with ``--listen`` speak them to the ReSpeaker.
-``q`` or Ctrl+C quits.
+Stage 3 uses Cursor's official API (cursor-sdk + CURSOR_API_KEY from
+https://cursor.com/dashboard/api). That API is an agent SDK, not a
+DeepSeek/OpenAI chat-completions URL. Local custom tools move the lamp.
 
 Roadmap:
   1. keyboard + motors + RGB
-  2. on-device speech keywords (this file, Vosk, no cloud)
-  3. a Chinese model you choose (DeepSeek / Qwen / Ollama), not OpenAI
+  2. on-device speech keywords (Vosk)
+  3. Cursor API as the brain (this file)
   4. spoken replies on the speaker
 """
 
@@ -40,6 +33,7 @@ import queue
 import select
 import shutil
 import sys
+import tempfile
 import threading
 import zipfile
 from dataclasses import dataclass
@@ -49,8 +43,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from urllib.request import urlretrieve
 
 # Bump when a stage lands. Printed at startup so a snapshot is identifiable.
-AGENT_STAGE = 2
-AGENT_LABEL = "keyboard + vosk listen"
+AGENT_STAGE = 3
+AGENT_LABEL = "keyboard + vosk + cursor-sdk"
 
 
 def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = None) -> Path:
@@ -186,10 +180,10 @@ LIGHT_ONLY: Dict[str, str] = {
     "专注": "focus",
 }
 
-HELP_TEXT = """本地台灯 Stage 2（无 OpenAI）
+HELP_TEXT = """本地台灯 Stage 3（Cursor API，无 OpenAI）
 动作：你好 / 点头 / 摇头 / 好奇 / 张望 / 开心 / 兴奋 / 惊讶 / 害羞 / 难过 / 待机
 灯光：开灯 / 关灯 / 暖光 / 冷光 / 自动 / 亮一点 / 暗一点
-说话：启动时加 --listen（先 --download-vosk）
+说话：--listen；不会的句子交给 Cursor（CURSOR_API_KEY）
 其它：status  rgb 255 176 80  help  q
 """
 
@@ -345,6 +339,203 @@ def extract_spoken_command(transcript: str) -> Optional[str]:
     return best_phrase
 
 
+CURSOR_LAMP_INSTRUCTIONS = """你是书桌上的智能灯 LeLamp。用简体中文短句说话，像一个稍微笨拙、很热心的台灯。
+用工具控制身体和灯光，不要假装已经动过。不要改文件、不要开 shell。
+express：点头/摇头/打招呼等动作（feeling 用 你好、点头、摇头、开心、难过、好奇、待机 等）。
+set_mood：只改灯（暖光、冷光、关灯、开灯、亮一点、暗一点）。
+set_rgb：用户说了具体颜色时用。
+"""
+
+
+def load_runtime_env() -> None:
+    for path in (Path(__file__).resolve().parent / ".env", Path.cwd() / ".env"):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key:
+                os.environ.setdefault(key, value)
+
+
+def cursor_api_key() -> str:
+    load_runtime_env()
+    key = (os.environ.get("CURSOR_API_KEY") or "").strip()
+    if key:
+        return key
+    env_path = Path(__file__).resolve().parent / ".env"
+    raise SystemExit(
+        "Missing CURSOR_API_KEY.\n"
+        "Create a key at https://cursor.com/dashboard/api (starts with crsr_).\n"
+        f"Put it in {env_path}:\n"
+        "  CURSOR_API_KEY=crsr_...\n"
+        "Cursor does not expose a chat/completions URL; this lamp uses cursor-sdk."
+    )
+
+
+def execute_lamp_tool(lamp: "LocalLamp", name: str, args: Optional[dict] = None) -> str:
+    """Run a Cursor custom tool against the local lamp body."""
+    payload = args or {}
+    if name == "express":
+        cmd = parse_line(str(payload.get("feeling") or ""))
+        if cmd.kind == "unknown":
+            return cmd.reply
+        return lamp.apply(cmd) or f"ok {cmd.kind}"
+    if name == "set_mood":
+        cmd = parse_line(str(payload.get("mood") or ""))
+        if cmd.kind == "unknown":
+            return cmd.reply
+        return lamp.apply(cmd) or f"ok {cmd.kind}"
+    if name == "set_rgb":
+        cmd = parse_line(
+            "rgb {} {} {}".format(
+                payload.get("red", 0),
+                payload.get("green", 0),
+                payload.get("blue", 0),
+            )
+        )
+        if cmd.kind == "unknown":
+            return cmd.reply
+        return lamp.apply(cmd) or f"ok {cmd.kind}"
+    return f"unknown tool {name}"
+
+
+def _cursor_run_text(run) -> str:
+    text_fn = getattr(run, "text", None)
+    if callable(text_fn):
+        try:
+            value = text_fn()
+            if value:
+                return str(value).strip()
+        except TypeError:
+            pass
+    wait_fn = getattr(run, "wait", None)
+    if callable(wait_fn):
+        done = wait_fn()
+        for attr in ("text", "result", "message"):
+            piece = getattr(done, attr, None)
+            if callable(piece):
+                try:
+                    piece = piece()
+                except TypeError:
+                    piece = None
+            if piece:
+                return str(piece).strip()
+        return str(done)
+    return str(run)
+
+
+class CursorLampSession:
+    """Cursor local agent that can only move this lamp (no repo edits)."""
+
+    def __init__(self, lamp: "LocalLamp") -> None:
+        self.lamp = lamp
+        self._agent = None
+        self._workspace = None
+        self._first = True
+
+    def start(self) -> None:
+        if self._agent is not None:
+            return
+        try:
+            from cursor_sdk import Agent, CustomTool, LocalAgentOptions
+        except ImportError as exc:
+            raise SystemExit(
+                f"cursor-sdk is not installed ({exc}).\n"
+                "In ~/lelamp_runtime run: uv add cursor-sdk"
+            ) from exc
+        key = cursor_api_key()
+        model = os.environ.get("CURSOR_MODEL", "composer-2.5")
+        self._workspace = Path(tempfile.mkdtemp(prefix="lelamp-cursor-"))
+        (self._workspace / "AGENTS.md").write_text(
+            CURSOR_LAMP_INSTRUCTIONS, encoding="utf-8"
+        )
+        lamp = self.lamp
+
+        def _express(args, _context=None):
+            return execute_lamp_tool(lamp, "express", args)
+
+        def _mood(args, _context=None):
+            return execute_lamp_tool(lamp, "set_mood", args)
+
+        def _rgb(args, _context=None):
+            return execute_lamp_tool(lamp, "set_rgb", args)
+
+        self._agent = Agent.create(
+            model=model,
+            api_key=key,
+            tools=["mcp"],
+            local=LocalAgentOptions(
+                cwd=str(self._workspace),
+                custom_tools={
+                    "express": CustomTool(
+                        description="Play a lamp body recording and matching light. feeling: 你好, 点头, 摇头, 开心, 难过, 好奇, 待机.",
+                        input_schema={
+                            "type": "object",
+                            "properties": {
+                                "feeling": {"type": "string"},
+                            },
+                            "required": ["feeling"],
+                        },
+                        execute=_express,
+                    ),
+                    "set_mood": CustomTool(
+                        description="Change light only. mood: 开灯, 关灯, 暖光, 冷光, 亮一点, 暗一点.",
+                        input_schema={
+                            "type": "object",
+                            "properties": {"mood": {"type": "string"}},
+                            "required": ["mood"],
+                        },
+                        execute=_mood,
+                    ),
+                    "set_rgb": CustomTool(
+                        description="Set exact RGB 0-255.",
+                        input_schema={
+                            "type": "object",
+                            "properties": {
+                                "red": {"type": "integer"},
+                                "green": {"type": "integer"},
+                                "blue": {"type": "integer"},
+                            },
+                            "required": ["red", "green", "blue"],
+                        },
+                        execute=_rgb,
+                    ),
+                },
+            ),
+        )
+        print(f"Cursor agent ready  model={model}")
+
+    def ask(self, text: str) -> str:
+        self.start()
+        prompt = text
+        if self._first:
+            prompt = CURSOR_LAMP_INSTRUCTIONS + "\n\n用户：" + text
+            self._first = False
+        run = self._agent.send(prompt)
+        reply = _cursor_run_text(run)
+        return reply
+
+    def close(self) -> None:
+        agent = self._agent
+        self._agent = None
+        if agent is not None:
+            close = getattr(agent, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+
+
 def vosk_model_dir() -> Path:
     override = os.environ.get("LELAMP_VOSK_MODEL")
     if override:
@@ -440,21 +631,37 @@ def vosk_listen_worker(
         out_q.put(f"__error__ 麦克风失败: {exc}")
 
 
-def dispatch_text(lamp: LocalLamp, raw: str) -> str:
+def dispatch_text(lamp: LocalLamp, raw: str, brain: Optional[CursorLampSession] = None) -> str:
     cmd = parse_line(raw)
     if cmd.kind == "quit":
         print(cmd.reply)
         return "quit"
+    if cmd.kind == "unknown" and brain is not None:
+        print("Cursor …")
+        reply = brain.ask(raw)
+        if reply:
+            print(reply)
+        return "chat"
     text = lamp.apply(cmd)
     if text:
         print(text)
     return cmd.kind
 
 
-def apply_speech(lamp: LocalLamp, transcript: str) -> str:
+def apply_speech(
+    lamp: LocalLamp,
+    transcript: str,
+    brain: Optional[CursorLampSession] = None,
+) -> str:
     print(f"灯< {transcript}")
     phrase = extract_spoken_command(transcript)
     if not phrase:
+        if brain is not None:
+            print("Cursor …")
+            reply = brain.ask(transcript)
+            if reply:
+                print(reply)
+            return "chat"
         print(f"听到「{transcript}」，但不是灯的指令。")
         return "unknown"
     if phrase != _compact_speech(transcript):
@@ -462,7 +669,13 @@ def apply_speech(lamp: LocalLamp, transcript: str) -> str:
     return dispatch_text(lamp, phrase)
 
 
-def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path) -> int:
+def run_listen_loop(
+    lamp: LocalLamp,
+    *,
+    device: Optional[int],
+    model_path: Path,
+    brain: Optional[CursorLampSession] = None,
+) -> int:
     stop = threading.Event()
     out_q: "queue.Queue[str]" = queue.Queue()
     worker = threading.Thread(
@@ -488,7 +701,7 @@ def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path)
                 return 1
             elif item:
                 print()
-                if apply_speech(lamp, item) == "quit":
+                if apply_speech(lamp, item, brain) == "quit":
                     return 0
             if select.select([sys.stdin], [], [], 0)[0]:
                 line = sys.stdin.readline()
@@ -496,7 +709,7 @@ def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path)
                     print("好，我先歇着。")
                     return 0
                 print()
-                if dispatch_text(lamp, line) == "quit":
+                if dispatch_text(lamp, line, brain) == "quit":
                     return 0
     except KeyboardInterrupt:
         print()
@@ -626,7 +839,7 @@ class LocalLamp:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="LeLamp local Stages 1–2 (no OpenAI)")
+    parser = argparse.ArgumentParser(description="LeLamp local Stages 1–3 (Cursor API, no OpenAI)")
     parser.add_argument("--sim", action="store_true", help="no motors/LED, print actions")
     parser.add_argument("--port", default=os.environ.get("LELAMP_PORT", "/dev/ttyACM0"))
     parser.add_argument("--id", dest="lamp_id", default=os.environ.get("LELAMP_ID", "lelamp"))
@@ -637,6 +850,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--say", action="append", default=[], help="inject a spoken phrase (repeatable)")
     parser.add_argument("--device", type=int, default=None, help="sounddevice input index")
     parser.add_argument("--model", type=Path, default=None, help="path to vosk-model-small-cn-0.22")
+    parser.add_argument("--ask", action="append", default=[], help="send one sentence to Cursor API (repeatable)")
+    parser.add_argument("--no-cursor", action="store_true", help="never call Cursor, even if CURSOR_API_KEY is set")
     parser.add_argument("--show-stage", action="store_true", help="print stage number and exit")
     parser.add_argument(
         "--snapshot",
@@ -656,10 +871,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.snapshot is not None:
         snapshot_current(args.snapshot)
         return 0
+    load_runtime_env()
     print(f"local_main  stage {AGENT_STAGE}  ({AGENT_LABEL})")
     if args.download_vosk:
         download_vosk_model(args.model)
         return 0
+    if args.ask and args.no_cursor:
+        raise SystemExit("--ask needs Cursor. Remove --no-cursor and set CURSOR_API_KEY.")
     lamp = LocalLamp(
         sim=args.sim,
         port=args.port,
@@ -667,6 +885,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         led_count=args.led_count,
         brightness=70,
     )
+    brain = None
+    if not args.no_cursor and (args.ask or os.environ.get("CURSOR_API_KEY")):
+        brain = CursorLampSession(lamp)
     lamp.start()
     try:
         if not args.no_wake:
@@ -674,11 +895,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for phrase in args.say:
             if apply_speech(lamp, phrase) == "quit":
                 return 0
-        if args.say and not args.listen:
+        for text in args.ask:
+            print(f"你：{text}")
+            reply = brain.ask(text) if brain is not None else ""
+            if reply:
+                print(reply)
+        if (args.say or args.ask) and not args.listen:
             return 0
         if args.listen:
             model_path = args.model if args.model is not None else vosk_model_dir()
-            return run_listen_loop(lamp, device=args.device, model_path=Path(model_path))
+            return run_listen_loop(
+                lamp,
+                device=args.device,
+                model_path=Path(model_path),
+                brain=brain,
+            )
         while True:
             try:
                 raw = input("灯> ")
@@ -686,9 +917,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print()
                 print("好，我先歇着。")
                 return 0
-            if dispatch_text(lamp, raw) == "quit":
+            if dispatch_text(lamp, raw, brain) == "quit":
                 return 0
     finally:
+        if brain is not None:
+            brain.close()
         lamp.stop()
     return 0
 

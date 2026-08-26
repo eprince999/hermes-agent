@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from plugins.lelamp.local_main import LocalLamp, extract_spoken_command, parse_line
+from plugins.lelamp.local_main import (
+    LocalLamp,
+    cursor_api_key,
+    execute_lamp_tool,
+    extract_spoken_command,
+    parse_line,
+)
 
 
 def _source() -> str:
@@ -104,10 +110,10 @@ def test_show_stage_prints_current_stage(capsys):
 def test_snapshot_saves_stage2_copy(tmp_path, capsys):
     from plugins.lelamp import local_main
 
-    dest = local_main.snapshot_current("stage2", dest_dir=tmp_path)
-    assert dest.name == "stage2.py"
+    dest = local_main.snapshot_current("stage3", dest_dir=tmp_path)
+    assert dest.name == "stage3.py"
     assert dest.is_file()
-    assert "AGENT_STAGE = 2" in dest.read_text(encoding="utf-8")
+    assert "AGENT_STAGE = 3" in dest.read_text(encoding="utf-8")
     assert "saved snapshot" in capsys.readouterr().out
     args = local_main.build_parser().parse_args(["--snapshot"])
     assert args.snapshot == ""
@@ -123,3 +129,29 @@ def test_main_sim_say_phrases_without_repl(capsys):
     assert "play nod" in out
     assert "rgb (0, 0, 0)" in out
     assert "关灯。" in out
+
+
+def test_execute_lamp_tool_moves_and_lights():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    assert "好的" in execute_lamp_tool(lamp, "express", {"feeling": "点头"})
+    assert lamp.last_expression == "nod"
+    execute_lamp_tool(lamp, "set_mood", {"mood": "关灯"})
+    assert lamp.last_rgb == (0, 0, 0)
+
+
+def test_cursor_api_key_missing_is_explicit(monkeypatch):
+    from plugins.lelamp import local_main
+
+    monkeypatch.setattr(local_main, "load_runtime_env", lambda: None)
+    monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+    try:
+        cursor_api_key()
+        raise AssertionError("expected SystemExit")
+    except SystemExit as exc:
+        assert "CURSOR_API_KEY" in str(exc)
