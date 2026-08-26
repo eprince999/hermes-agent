@@ -6,6 +6,27 @@
 
 官方 LeLamp 用的是树莓派 4。Zero 2W 能做「看人 / 点头 / 躲开」这类短技能，做不了 ACT 级操作，更跑不动跳跃 RL。
 
+## 0. 先录示教（用手摆灯 + 同步存图）
+
+这就是「给图片的同时手动挪舵机」：脚本关掉力矩，你掰灯，它按固定帧率同时写 `joints.csv` 和 `rgb/000000.jpg`。
+
+```bash
+cd lelamp_il
+
+# 接上灯和灯头摄像头
+python record_demo.py --task look_at_person --port /dev/ttyUSB0 --id lelamp \
+    --episodes 50 --seconds 6
+
+# 没有硬件，先走一遍屏幕上的步骤
+python record_demo.py --task look_at_person --dummy --episodes 2 --seconds 3
+```
+
+每一段开始前按 Enter，倒计时结束后**立刻用手把灯头转到看着人/手**，保持到这一段结束。下一段换位置（左/中/右、近/远）。录完后：
+
+```bash
+python train.py --data ./data/look_at_person --epochs 40 --export ./artifacts
+```
+
 ## 1. 笔记本上训练
 
 ```bash

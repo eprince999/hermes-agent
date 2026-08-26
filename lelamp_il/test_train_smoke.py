@@ -116,6 +116,44 @@ def test_synthetic_train(tmp_path: Path) -> None:
     assert meta["chunk_size"] == 8
 
 
+def test_record_dummy_then_load(tmp_path: Path) -> None:
+    from record_demo import main as record_main
+
+    data_root = tmp_path / "data"
+    rc = record_main(
+        [
+            "--task",
+            "look_at_person",
+            "--out",
+            str(data_root),
+            "--dummy",
+            "--no-prompt",
+            "--episodes",
+            "2",
+            "--seconds",
+            "1.5",
+            "--fps",
+            "20",
+        ]
+    )
+    assert rc == 0
+    ep0 = data_root / "look_at_person" / "ep_000"
+    assert (ep0 / "joints.csv").is_file()
+    frames = list((ep0 / "rgb").glob("*.jpg"))
+    assert len(frames) >= 20
+    joints = _load_joints_csv(ep0 / "joints.csv")
+    assert joints.shape[0] == len(frames)
+    samples, vision = build_samples(
+        data_root / "look_at_person",
+        chunk_size=8,
+        record_fps=20,
+        control_hz=10,
+    )
+    assert vision is True
+    assert len(samples) > 0
+    assert samples[0].frame is not None
+
+
 if __name__ == "__main__":
     import tempfile
 
@@ -126,4 +164,5 @@ if __name__ == "__main__":
         test_policy_shapes()
         test_onnx_export(tmp / "onnx")
         test_synthetic_train(tmp / "train")
+        test_record_dummy_then_load(tmp / "record")
     print("ok")
