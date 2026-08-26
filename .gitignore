@@ -137,3 +137,16 @@ RELEASE_v*.md
 # Desktop demo-run scratch output (hermes writes demo/*.txt during recorded
 # walkthroughs). Throwaway artifacts, never part of the app.
 apps/desktop/demo/
+
+# Scratch copies from local_main.py --snapshot. Named stage archives stay tracked.
+plugins/lelamp/lamp_snapshots/*
+!plugins/lelamp/lamp_snapshots/stage*.py
+
+# User drop-in tracks live in music/; generated fallback beats go in music/.builtin/
+plugins/lelamp/music/**
+
+# LeLamp downloaded speech models (fetch on the Pi with --download-vosk / --download-piper)
+plugins/lelamp/models/*.onnx
+plugins/lelamp/models/*.onnx.json
+plugins/lelamp/models/*.onnx.part
+plugins/lelamp/models/vosk-model-*/
