@@ -182,7 +182,7 @@ def test_main_sim_scripted_session(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
     assert local_main.main(["--sim", "--no-wake"]) == 0
     out = capsys.readouterr().out
-    assert "Yeah." in out
+    assert "play nod" in out
     assert "expression=nod" in out
     assert "Okay. I'll be right here." in out
 
@@ -229,7 +229,7 @@ def test_express_tool_nods_on_agree_feeling():
     assert lamp.last_expression == "headshake"
 
 
-def test_long_speech_does_not_snip_a_buried_keyword():
+def test_long_speech_goes_to_model_not_keyword_snip():
     lamp = LocalLamp(
         sim=True,
         port="/dev/null",
@@ -242,12 +242,13 @@ def test_long_speech_does_not_snip_a_buried_keyword():
     class Brain:
         def ask(self, text):
             seen.append(text)
-            return "Sure, I agree."
+            return "ok"
 
     result = apply_speech(lamp, "Do you agree warm light is nicer", Brain())
-    assert result == "unknown"
-    assert seen == []
+    assert result == "chat"
+    assert seen == ["Do you agree warm light is nicer"]
     assert lamp.last_expression != "nod"
+    assert lamp.last_spoken == ""
 
 
 def test_short_keyword_speech_stays_local():
@@ -265,9 +266,10 @@ def test_short_keyword_speech_stays_local():
 
     apply_speech(lamp, "lights off", Brain())
     assert lamp.last_rgb == (0, 0, 0)
+    assert lamp.last_spoken == ""
 
 
-def test_spoken_keywords_stay_local_unknown_is_ignored():
+def test_spoken_chat_goes_to_model_for_a_pose():
     lamp = LocalLamp(
         sim=True,
         port="/dev/null",
@@ -280,13 +282,13 @@ def test_spoken_keywords_stay_local_unknown_is_ignored():
     class Brain:
         def ask(self, text):
             seen.append(text)
-            return "Yeah, I'm here."
+            return "I would talk but the lamp stays silent."
 
-    assert apply_speech(lamp, "nod", Brain()) == "express"
-    assert lamp.last_expression == "nod"
-    assert apply_speech(lamp, "how are you", Brain()) == "unknown"
-    assert apply_speech(lamp, "yeah I like the warm light", Brain()) == "unknown"
-    assert seen == []
+    assert apply_speech(lamp, "nod", Brain()) == "chat"
+    assert apply_speech(lamp, "how are you", Brain()) == "chat"
+    assert apply_speech(lamp, "yeah I like the warm light", Brain()) == "chat"
+    assert seen == ["nod", "how are you", "yeah I like the warm light"]
+    assert lamp.last_spoken == ""
 
 
 def test_join_speech_glues_vosk_fragments():
@@ -354,7 +356,7 @@ def test_listen_hello_does_not_replay_wake_up():
 
     apply_speech(lamp, "hello", Brain(), listen_mode=True)
     assert lamp.last_expression != "wake_up"
-    assert lamp.last_spoken == "Yeah?"
+    assert lamp.last_spoken == ""
 
 
 def test_show_stage_prints_current_stage(capsys):
@@ -387,7 +389,7 @@ def test_main_sim_say_phrases_without_repl(capsys):
     out = capsys.readouterr().out
     assert "play nod" in out
     assert "rgb (0, 0, 0)" in out
-    assert "Lights off." in out
+    assert "[sim] speak" not in out
 
 
 def test_create_cursor_agent_omits_unsupported_tools_kwarg():
@@ -419,7 +421,7 @@ def test_execute_lamp_tool_moves_and_lights():
         led_count=64,
         brightness=70,
     )
-    assert "Yeah." in execute_lamp_tool(lamp, "express", {"feeling": "nod"})
+    assert "ok nod" in execute_lamp_tool(lamp, "express", {"feeling": "nod"})
     assert lamp.last_expression == "nod"
     execute_lamp_tool(lamp, "set_mood", {"mood": "lights off"})
     assert lamp.last_rgb == (0, 0, 0)
@@ -524,29 +526,27 @@ def test_main_sim_speak_without_cursor(capsys):
     out = capsys.readouterr().out
     assert "stage 3" in out
     assert "[sim] speak Hey. I'm here with you." in out
-    assert "Vosk + keywords" in out
-    assert "Cursor will understand" not in out
+    assert "the model picks a pose" in out or "local poses" in out
 
 
-def test_main_ignores_cursor_api_key(monkeypatch, capsys):
+def test_main_no_cursor_keeps_keywords_silent(monkeypatch, capsys):
     from plugins.lelamp import local_main
 
     monkeypatch.setenv("CURSOR_API_KEY", "crsr_fake_key")
-    assert local_main.main(["--sim", "--no-wake", "--say", "nod"]) == 0
+    assert local_main.main(["--sim", "--no-wake", "--no-cursor", "--say", "nod"]) == 0
     out = capsys.readouterr().out
     assert "play nod" in out
-    assert "Yeah." in out
-    assert "Cursor will understand" not in out
-    assert "cursor-sdk" not in out
+    assert "[sim] speak" not in out
+    assert "Cursor agent ready" not in out
 
 
-def test_main_sim_ask_is_a_keyword(capsys):
+def test_main_sim_ask_without_key_is_local(capsys):
     from plugins.lelamp import local_main
 
     assert local_main.main(["--sim", "--no-wake", "--ask", "warm light"]) == 0
     out = capsys.readouterr().out
-    assert "Warm light." in out
-    assert "Cursor …" not in out
+    assert "rgb" in out
+    assert "[sim] speak" not in out
 
 
 def test_english_keywords_parse_and_reply():
@@ -844,7 +844,7 @@ def test_look_tool_uses_sim_camera():
     assert lamp.last_expression == "scanning"
 
 
-def test_what_do_you_see_snaps_locally():
+def test_what_do_you_see_goes_to_model():
     lamp = LocalLamp(
         sim=True,
         port="/dev/null",
@@ -857,14 +857,27 @@ def test_what_do_you_see_snaps_locally():
     class Brain:
         def ask(self, text, photo=None):
             seen.append(text)
-            return "I see you."
+            return ""
 
     assert parse_line("what do you see").kind == "snap"
     assert parse_line("look").kind == "snap"
-    assert apply_speech(lamp, "what do you see", Brain()) == "snap"
-    assert seen == []
+    assert apply_speech(lamp, "what do you see", Brain()) == "chat"
+    assert seen == ["what do you see"]
+    assert lamp.last_spoken == ""
+
+
+def test_what_do_you_see_snaps_without_a_model():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    assert apply_speech(lamp, "what do you see") == "snap"
     assert lamp.last_photo
     assert lamp.last_expression == "scanning"
+    assert lamp.last_spoken == ""
 
 
 def test_main_sim_snap(capsys):

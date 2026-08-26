@@ -50,7 +50,7 @@ Stage 1 (keyboard, no cloud): `sudo uv run python local_main.py`. Type `hello` /
 
 Stage 2 (ReSpeaker, English): `uv add vosk`, then `--download-vosk` (English small model) and `--listen`. Say **hello lamp** once; after Yeah?, say a keyword. Short commands (`lights off`, `nod`, `yeah`) skip the wake word. `--no-wake-word` opens the mic. Mapping without a mic: `--say "lights off"`.
 
-Stage 3 (Vosk + keywords + speaker): `uv add vosk piper-tts`, then `--download-vosk` and `--download-piper`. Speech is on-device English Vosk. Only keyword commands run (`hello`, `nod`, `yeah`, `shake`, `warm`, `lights off`, `look` / `what do you see` / `snap`). Unknown sentences are ignored — there is no cloud LLM. Camera is on-demand stills (`look` / `--snap`), not a live stream. Test with `--listen`, `--sim --snap`, or `--sim --say "what do you see"`. `--no-speak` prints only. Do not clone celebrity or TV voices.
+Stage 3 (Vosk + silent poses): put `CURSOR_API_KEY=crsr_...` in `~/lelamp_runtime/.env`, `uv add vosk cursor-sdk`, then `--download-vosk` and `--listen`. Vosk transcribes. The model only calls `express` / `set_mood` — it does not speak and does not use a personality prompt. Lights off / volume stay local. Camera stills are on-demand (`look` / `--snap`). Test with `--listen` or `--sim --no-cursor --say "nod"`. `--speak` is optional TTS for a test phrase only.
 
 The LiveKit + OpenAI Realtime path is optional later: copy `plugins/lelamp/runtime_main.py` over `~/lelamp_runtime/main.py`, put `OPENAI_API_KEY` in `.env`, then `sudo uv run main.py console`.
 
@@ -100,9 +100,9 @@ Official recordings: `wake_up`, `nod`, `headshake`, `curious`, `scanning`, `exci
 
 - Do not invent recording names. Unknown expressions are rejected before any servo moves.
 - Do not fully spin the base yaw or head yaw past about ±90° from center during calibration.
-- Pi Zero 2W cannot run a cloud LLM locally either; this stage does not try. `local_main.py` uses Vosk keywords plus Piper/espeak. Leave official `main.py` (OpenAI Realtime) untouched.
+- Pi Zero 2W cannot run a cloud LLM locally. `local_main.py` uses Vosk plus Cursor only to pick a pose. Leave official `main.py` (OpenAI Realtime) untouched.
 - One Raspberry Pi should run only this lamp's runtime while you talk to it.
-- Stage 3 does not use `CURSOR_API_KEY` or cursor-sdk. Cloud Agents cannot move Pi GPIO.
+- Stage 3 does not speak. Cursor tools move the body; there is no TTS reply and no chat prompt. Cloud Agents cannot move Pi GPIO.
 
 ## Verification
 
