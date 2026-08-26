@@ -391,6 +391,29 @@ def extract_spoken_command(transcript: str) -> Optional[str]:
     return best_phrase
 
 
+_HARDWARE_KINDS = {
+    "mood", "brightness_delta", "brightness_set",
+    "volume", "volume_delta", "rgb", "quit", "help", "status",
+}
+_CHAT_FILLERS = {"uh", "um", "ah", "er", "mm", "hmm", "mhm"}
+
+
+def hardware_spoken_command(transcript: str) -> Optional[str]:
+    """Lights, volume, quit — not feelings. Feelings go to Cursor to talk."""
+    compact = _compact_speech(transcript)
+    if not compact:
+        return None
+    cmd = parse_line(compact)
+    if cmd.kind in _HARDWARE_KINDS:
+        return compact
+    for prefix in _POLITE_PREFIXES:
+        if compact.startswith(prefix):
+            rest = compact[len(prefix):].strip()
+            if rest and parse_line(rest).kind in _HARDWARE_KINDS:
+                return rest
+    return None
+
+
 def direct_spoken_command(transcript: str) -> Optional[str]:
     """Local command only when the utterance IS the command (plus please/can you).
 
@@ -581,20 +604,20 @@ def resolve_feeling(name: str) -> str:
     raise ValueError(raw)
 
 
-CURSOR_LAMP_INSTRUCTIONS = """You are LeLamp, a calm companion who happens to be a desk lamp.
-Talk like a close friend in the room: warm, natural spoken English, ONE short sentence. Not a robot, not a call-center assistant, not a TV character. Never use Chinese.
-Keep chatting. Do not ask them to say hello lamp again.
-Control the body and light with tools. Never pretend you moved. Do not edit files or open a shell.
+CURSOR_LAMP_INSTRUCTIONS = """You are LeLamp, a desk lamp and a close friend in the room.
+This is a spoken conversation. Understand what they mean, remember this chat, and answer as yourself.
+Warm, natural spoken English, ONE short sentence. Not a robot, not a call-center assistant, not a TV character. Never use Chinese.
+Keep chatting. Do not ask them to say hello lamp again. Do not write code or edit files.
 
-Every reply MUST call express first, then talk:
+When you have a feeling, call express first, then talk:
 - agree / yes → feeling=nod
 - disagree / no → feeling=shake
 - unclear → feeling=curious
 - hello → feeling=hello
 - happy → feeling=happy; sad → feeling=sad
 
-Do not wait for the user to say nod or shake. If they chat or ask your opinion, nod or shake from your stance.
-If the utterance is clearly unfinished (two or three syllables, no question), just say "mm" — do not ask "and then?".
+If they chat or ask your opinion, nod or shake from your stance, then speak.
+If the utterance is clearly unfinished, just say "mm".
 set_mood: light only (warm, cool, off, on, brighter, dimmer).
 set_rgb: only when they give an exact color.
 """
@@ -1217,9 +1240,7 @@ class CursorLampSession:
 
     def ask(self, text: str) -> str:
         self.start()
-        nudge = "express first, then one short spoken sentence.\nUser: "
-        prompt = nudge + text
-        run = self._agent.send(prompt)
+        run = self._agent.send(text.strip())
         reply = _cursor_run_text(run)
         return reply
 
@@ -1415,16 +1436,26 @@ def apply_speech(
     if listen_mode and compact in {"hello", "hi", "hey"}:
         utter(lamp, wake_ack(transcript))
         return "ack"
+    if compact in _CHAT_FILLERS:
+        utter(lamp, "Mm.")
+        return "ack"
+    # With Cursor, only lights/volume/quit stay local. Chat — including
+    # nod, yeah, how are you — goes to the model so it can understand.
+    if brain is not None:
+        hardware = hardware_spoken_command(transcript)
+        if hardware:
+            if hardware != compact:
+                print(f"heard as: {hardware}")
+            return dispatch_text(lamp, hardware, None)
+        print("Cursor …")
+        reply = brain.ask(transcript)
+        utter(lamp, reply)
+        return "chat"
     phrase = direct_spoken_command(transcript)
     if phrase:
         if phrase != compact:
             print(f"heard as: {phrase}")
         return dispatch_text(lamp, phrase, brain)
-    if brain is not None:
-        print("Cursor …")
-        reply = brain.ask(transcript)
-        utter(lamp, reply)
-        return "chat"
     print(f"I heard “{transcript}”, but that isn't a lamp command.")
     return "unknown"
 
@@ -1495,7 +1526,11 @@ def run_listen_loop(
                         _listen_settle(catcher, out_q)
                     ready = rest
                 if ready:
-                    local = direct_spoken_command(ready)
+                    local = (
+                        hardware_spoken_command(ready)
+                        if brain is not None
+                        else direct_spoken_command(ready)
+                    )
                     chatting = (not wake_word) or (time.monotonic() < awake_until)
                     if local:
                         if apply_speech(lamp, ready, brain, listen_mode=True) == "quit":
@@ -1504,7 +1539,7 @@ def run_listen_loop(
                         if chatting:
                             awake_until = time.monotonic() + session_s
                     elif chatting:
-                        if utterance_too_short(ready):
+                        if brain is None and utterance_too_short(ready):
                             print(f"(too short for the model: {ready})")
                         elif apply_speech(lamp, ready, brain, listen_mode=True) == "quit":
                             return 0
@@ -1813,6 +1848,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     brain = None
     if not args.no_cursor and (args.ask or os.environ.get("CURSOR_API_KEY")):
         brain = CursorLampSession(lamp)
+    if brain is not None:
+        print("talk: Cursor will understand you (same model API as this chat)")
+    else:
+        print("talk: local commands only. Put CURSOR_API_KEY=crsr_... in .env to chat.")
     voice_warm = None
     if not args.sim:
         voice_warm = threading.Thread(target=warm_tts, daemon=True, name="lelamp-voice")

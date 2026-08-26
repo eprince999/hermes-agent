@@ -14,6 +14,7 @@ from plugins.lelamp.local_main import (
     direct_spoken_command,
     execute_lamp_tool,
     extract_spoken_command,
+    hardware_spoken_command,
     join_speech,
     looks_complete_utterance,
     parse_line,
@@ -198,6 +199,10 @@ def test_direct_spoken_command_keeps_full_sentences_for_the_model():
     assert direct_spoken_command("warm light") == "warm light"
     assert direct_spoken_command("Do you agree warm light is nicer") is None
     assert direct_spoken_command("what is the weather today") is None
+    assert hardware_spoken_command("lights off") == "lights off"
+    assert hardware_spoken_command("please lights off") == "lights off"
+    assert hardware_spoken_command("nod") is None
+    assert hardware_spoken_command("how are you") is None
 
 
 def test_resolve_feeling_agree_and_disagree():
@@ -255,10 +260,31 @@ def test_short_keyword_speech_stays_local():
 
     class Brain:
         def ask(self, text):
-            raise AssertionError("short nod should not call Cursor")
+            raise AssertionError("lights off should not call Cursor")
 
-    apply_speech(lamp, "nod", Brain())
-    assert lamp.last_expression == "nod"
+    apply_speech(lamp, "lights off", Brain())
+    assert lamp.last_rgb == (0, 0, 0)
+
+
+def test_spoken_chat_goes_to_cursor_not_canned_nod():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    seen = []
+
+    class Brain:
+        def ask(self, text):
+            seen.append(text)
+            return "Yeah, I'm here."
+
+    assert apply_speech(lamp, "nod", Brain()) == "chat"
+    assert apply_speech(lamp, "how are you", Brain()) == "chat"
+    assert apply_speech(lamp, "yeah I like the warm light", Brain()) == "chat"
+    assert seen == ["nod", "how are you", "yeah I like the warm light"]
 
 
 def test_join_speech_glues_vosk_fragments():
