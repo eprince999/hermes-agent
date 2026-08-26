@@ -98,6 +98,8 @@ ALIASES: Dict[str, str] = {
     "ok": "nod",
     "okay": "nod",
     "sure": "nod",
+    "yeah": "nod",
+    "yep": "nod",
     "headshake": "headshake",
     "no": "headshake",
     "shake": "headshake",
@@ -168,7 +170,7 @@ LIGHT_ONLY: Dict[str, str] = {
 
 EXPRESSION_REPLIES: Dict[str, str] = {
     "wake_up": "Hey. I'm here with you.",
-    "nod": "Yeah, I think so too.",
+    "nod": "Yeah.",
     "headshake": "I'd rather not.",
     "curious": "Tell me a bit more?",
     "scanning": "I'm looking.",
@@ -208,7 +210,7 @@ Motion: hello / nod / shake / curious / happy / idle
 Light: lights on / lights off / warm / cool / brighter / dimmer
 Speaker: louder / quieter / volume 100; test: --speak hello
 Voice: Piper companion (ryan) after --download-piper; espeak is fallback only
-Talk: say hello lamp, then one full sentence.
+Talk: say hello lamp once, then keep chatting.
       Agree → nod. Disagree → shake head.
 Other: status  rgb 255 176 80  help  q
 """
@@ -266,14 +268,16 @@ def spoken_for(recording: str, source: str) -> str:
 
 
 def wake_ack(transcript: str) -> str:
-    return "I'm here. Go ahead."
+    return "Yeah?"
 
 
 def utterance_too_short(text: str) -> bool:
     compact = _compact_speech(text)
     if not compact:
         return True
-    return len(compact.split()) < 3
+    if direct_spoken_command(compact):
+        return False
+    return len(compact.split()) < 2
 
 
 def _scale_rgb(rgb: Tuple[int, int, int], brightness: int) -> Tuple[int, int, int]:
@@ -447,6 +451,17 @@ def split_wake(transcript: str) -> Tuple[bool, str]:
     return False, compact
 
 
+_TRAILING_INCOMPLETE = {
+    "a", "an", "the", "to", "for", "and", "or", "but", "if", "is", "are",
+    "was", "were", "i", "my", "your", "of", "in", "on", "at", "with",
+    "can", "could", "would", "will",
+}
+_SHORT_COMPLETE = {
+    "thank you", "thanks", "good night", "good morning", "good evening",
+    "how are you", "you good", "what's up", "whats up", "you okay",
+}
+
+
 def looks_complete_utterance(transcript: str) -> bool:
     compact = _compact_speech(transcript)
     if not compact:
@@ -458,25 +473,22 @@ def looks_complete_utterance(transcript: str) -> bool:
         return True
     if hit and rest and (direct_spoken_command(rest) or looks_complete_rest(rest)):
         return True
-    words = compact.split()
-    if compact.endswith("?"):
-        return True
-    if len(words) >= 4:
-        return True
-    if words and words[0] in _EN_QUESTION_STARTS and len(words) >= 3:
-        return True
-    return False
+    return looks_complete_rest(compact)
 
 
 def looks_complete_rest(compact: str) -> bool:
     if not compact:
         return False
     words = compact.split()
+    if compact in _SHORT_COMPLETE:
+        return True
+    if words[-1] in _TRAILING_INCOMPLETE:
+        return False
     if compact.endswith("?"):
         return True
     if len(words) >= 4:
         return True
-    if words and words[0] in _EN_QUESTION_STARTS and len(words) >= 3:
+    if words[0] in _EN_QUESTION_STARTS and len(words) >= 3:
         return True
     return False
 
@@ -484,8 +496,8 @@ def looks_complete_rest(compact: str) -> bool:
 class SpeechCatcher:
     """Hold Vosk finals until silence so 'what day' + 'is it' become one turn."""
 
-    def __init__(self, hold_s: float = 0.9, now=time.monotonic) -> None:
-        self.hold_s = max(0.15, float(hold_s))
+    def __init__(self, hold_s: float = 0.45, now=time.monotonic) -> None:
+        self.hold_s = max(0.12, float(hold_s))
         self._now = now
         self.parts: List[str] = []
         self.partial = ""
@@ -494,6 +506,11 @@ class SpeechCatcher:
 
     def _joined(self) -> str:
         return join_speech(*self.parts, self.partial)
+
+    def clear(self) -> None:
+        self.parts = []
+        self.partial = ""
+        self.flush_now = False
 
     def note_partial(self, text: str) -> str:
         self.partial = (text or "").strip()
@@ -517,16 +534,16 @@ class SpeechCatcher:
         joined = self._joined()
         if not joined:
             return ""
-        wait = self.hold_s
         compact = _compact_speech(joined)
-        if not self.flush_now:
-            if len(compact.split()) < 4:
-                wait = max(self.hold_s, 1.6)
-        if not self.flush_now and (self._now() - self.last_voice) < wait:
+        if self.flush_now:
+            wait = 0.0
+        elif len(compact.split()) < 4:
+            wait = max(self.hold_s, 0.75)
+        else:
+            wait = self.hold_s
+        if (self._now() - self.last_voice) < wait:
             return ""
-        self.parts = []
-        self.partial = ""
-        self.flush_now = False
+        self.clear()
         return joined
 
 
@@ -536,6 +553,13 @@ def drain_queue(out_q: "queue.Queue[str]") -> None:
             out_q.get_nowait()
         except queue.Empty:
             break
+
+
+def _listen_settle(catcher: SpeechCatcher, out_q: "queue.Queue[str]") -> None:
+    """Drop speaker echo so the next turn starts clean."""
+    time.sleep(0.08)
+    drain_queue(out_q)
+    catcher.clear()
 
 
 def resolve_feeling(name: str) -> str:
@@ -558,7 +582,8 @@ def resolve_feeling(name: str) -> str:
 
 
 CURSOR_LAMP_INSTRUCTIONS = """You are LeLamp, a calm companion who happens to be a desk lamp.
-Talk like a close friend in the room: warm, natural spoken English, one or two short sentences. Not a robot, not a call-center assistant, not a TV character. Never use Chinese.
+Talk like a close friend in the room: warm, natural spoken English, ONE short sentence. Not a robot, not a call-center assistant, not a TV character. Never use Chinese.
+Keep chatting. Do not ask them to say hello lamp again.
 Control the body and light with tools. Never pretend you moved. Do not edit files or open a shell.
 
 Every reply MUST call express first, then talk:
@@ -740,6 +765,85 @@ def _speak_espeak(text: str, volume: int) -> str:
 
 
 _PIPER_VOICE_OBJ = None
+_MIC_MUTE = threading.Event()
+PIPER_LENGTH_SCALE = 1.0
+
+
+def _piper_synth_config():
+    try:
+        from piper import SynthesisConfig
+
+        return SynthesisConfig(length_scale=PIPER_LENGTH_SCALE)
+    except Exception:
+        return None
+
+
+def _piper_chunk_bytes(chunk) -> bytes:
+    for attr in ("audio_int16_bytes", "audio_bytes"):
+        val = getattr(chunk, attr, None)
+        if callable(val):
+            try:
+                val = val()
+            except TypeError:
+                val = None
+        if val:
+            return bytes(val)
+    audio = getattr(chunk, "audio_float_array", None)
+    if audio is None:
+        if isinstance(chunk, (bytes, bytearray)):
+            return bytes(chunk)
+        return b""
+    clipped = [max(-1.0, min(1.0, float(s))) for s in audio]
+    return b"".join(int(s * 32767).to_bytes(2, "little", signed=True) for s in clipped)
+
+
+def _piper_stream_play(text: str, model: Path) -> bool:
+    global _PIPER_VOICE_OBJ
+    try:
+        from piper import PiperVoice
+    except Exception:
+        return False
+    try:
+        if _PIPER_VOICE_OBJ is None:
+            _PIPER_VOICE_OBJ = PiperVoice.load(str(model))
+        voice = _PIPER_VOICE_OBJ
+    except Exception as exc:
+        print(f"piper load failed: {exc}")
+        return False
+    synthesize = getattr(voice, "synthesize", None)
+    if not callable(synthesize):
+        return False
+    aplay = _bin("aplay")
+    if not aplay:
+        return False
+    sample_rate = getattr(getattr(voice, "config", None), "sample_rate", None) or 22050
+    play = subprocess.Popen(
+        [aplay, "-q", "-r", str(int(sample_rate)), "-f", "S16_LE", "-t", "raw", "-c", "1"],
+        stdin=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        syn_config = _piper_synth_config()
+        try:
+            chunks = synthesize(text, syn_config=syn_config) if syn_config is not None else synthesize(text)
+        except TypeError:
+            chunks = synthesize(text)
+        if play.stdin is None:
+            play.kill()
+            return False
+        for chunk in chunks:
+            raw = _piper_chunk_bytes(chunk)
+            if raw:
+                play.stdin.write(raw)
+        play.stdin.close()
+        return play.wait(timeout=60) == 0
+    except Exception as exc:
+        print(f"piper stream failed: {exc}")
+        try:
+            play.kill()
+        except Exception:
+            pass
+        return False
 
 
 def _piper_synth_python(text: str, model: Path, wav_path: str) -> bool:
@@ -754,13 +858,7 @@ def _piper_synth_python(text: str, model: Path, wav_path: str) -> bool:
         voice = _PIPER_VOICE_OBJ
         import wave
 
-        syn_config = None
-        try:
-            from piper import SynthesisConfig
-
-            syn_config = SynthesisConfig(length_scale=1.08)
-        except Exception:
-            syn_config = None
+        syn_config = _piper_synth_config()
         with wave.open(wav_path, "wb") as wav_file:
             if syn_config is not None:
                 voice.synthesize_wav(text, wav_file, syn_config=syn_config)
@@ -802,6 +900,8 @@ def _speak_piper(text: str) -> str:
     if model is None:
         print("piper model missing. Run: sudo uv run python local_main.py --download-piper")
         return "none"
+    if _piper_stream_play(text, model):
+        return "piper"
     fd, wav_path = tempfile.mkstemp(suffix=".wav")
     os.close(fd)
     try:
@@ -814,6 +914,24 @@ def _speak_piper(text: str) -> str:
         return "piper"
     finally:
         Path(wav_path).unlink(missing_ok=True)
+
+
+def warm_tts() -> None:
+    """Load Piper once so the first reply does not stall."""
+    model = piper_model_path()
+    if model is None or not _piper_can_synth():
+        return
+    global _PIPER_VOICE_OBJ
+    if _PIPER_VOICE_OBJ is not None:
+        return
+    try:
+        from piper import PiperVoice
+
+        print("loading companion voice…")
+        _PIPER_VOICE_OBJ = PiperVoice.load(str(model))
+        print("voice ready")
+    except Exception as exc:
+        print(f"voice warm failed: {exc}")
 
 
 def speak_text(
@@ -830,33 +948,37 @@ def speak_text(
     if sim:
         print(f"[sim] speak {cleaned}")
         return "sim"
-    engine = find_tts_engine()
+    _MIC_MUTE.set()
     try:
-        if engine == "piper":
-            used = _speak_piper(cleaned)
-            if used == "piper":
-                return used
-            engine = "espeak-ng" if _bin("espeak-ng") else ("espeak" if _bin("espeak") else "none")
-        if engine in {"espeak-ng", "espeak"}:
-            used = _speak_espeak(cleaned, volume)
-            if used in {"espeak-ng", "espeak"}:
-                return used
-        elif engine == "none":
-            pass
-        else:
-            print(f"unknown LELAMP_TTS={engine!r} (use piper or espeak-ng)")
+        engine = find_tts_engine()
+        try:
+            if engine == "piper":
+                used = _speak_piper(cleaned)
+                if used == "piper":
+                    return used
+                engine = "espeak-ng" if _bin("espeak-ng") else ("espeak" if _bin("espeak") else "none")
+            if engine in {"espeak-ng", "espeak"}:
+                used = _speak_espeak(cleaned, volume)
+                if used in {"espeak-ng", "espeak"}:
+                    return used
+            elif engine == "none":
+                pass
+            else:
+                print(f"unknown LELAMP_TTS={engine!r} (use piper or espeak-ng)")
+                return "error"
+        except subprocess.TimeoutExpired:
+            print("speak timed out")
             return "error"
-    except subprocess.TimeoutExpired:
-        print("speak timed out")
-        return "error"
-    except Exception as exc:
-        print(f"speak failed: {exc}")
-        return "error"
-    print(
-        "No TTS. For a human voice: uv add piper-tts && "
-        "sudo uv run python local_main.py --download-piper"
-    )
-    return "none"
+        except Exception as exc:
+            print(f"speak failed: {exc}")
+            return "error"
+        print(
+            "No TTS. For a human voice: uv add piper-tts && "
+            "sudo uv run python local_main.py --download-piper"
+        )
+        return "none"
+    finally:
+        _MIC_MUTE.clear()
 
 
 def utter(lamp: "LocalLamp", text: str, *, speak: bool = True) -> None:
@@ -912,8 +1034,8 @@ def execute_lamp_tool(lamp: "LocalLamp", name: str, args: Optional[dict] = None)
             cmd = parse_line(feeling)
             if cmd.kind == "unknown":
                 return cmd.reply
-            return lamp.apply(cmd) or f"ok {cmd.kind}"
-        return lamp.apply(Command("express", rec, spoken_for(rec, feeling))) or f"ok {rec}"
+            return lamp.apply(cmd, wait_motion=False) or f"ok {cmd.kind}"
+        return lamp.apply(Command("express", rec, spoken_for(rec, feeling)), wait_motion=False) or f"ok {rec}"
     if name == "set_mood":
         cmd = parse_line(str(payload.get("mood") or ""))
         if cmd.kind == "unknown":
@@ -1018,7 +1140,6 @@ class CursorLampSession:
         self.lamp = lamp
         self._agent = None
         self._workspace = None
-        self._first = True
 
     def start(self) -> None:
         if self._agent is not None:
@@ -1096,14 +1217,8 @@ class CursorLampSession:
 
     def ask(self, text: str) -> str:
         self.start()
-        nudge = (
-            "First call express (agree=nod, disagree=headshake), "
-            "then reply in fluent English.\nUser: "
-        )
+        nudge = "express first, then one short spoken sentence.\nUser: "
         prompt = nudge + text
-        if self._first:
-            prompt = CURSOR_LAMP_INSTRUCTIONS + "\n\n" + prompt
-            self._first = False
         run = self._agent.send(prompt)
         reply = _cursor_run_text(run)
         return reply
@@ -1172,9 +1287,24 @@ def find_input_device(preferred: Optional[int] = None):
 def _vosk_step(rec, chunk: bytes) -> Tuple[str, str]:
     if rec.AcceptWaveform(chunk):
         payload = json.loads(rec.Result())
-        return "final", (payload.get("text") or "").strip()
+        text = (payload.get("text") or "").strip()
+        if _vosk_too_noisy(payload, text):
+            return "final", ""
+        return "final", text
     payload = json.loads(rec.PartialResult())
     return "partial", (payload.get("partial") or "").strip()
+
+
+def _vosk_too_noisy(payload: dict, text: str) -> bool:
+    """Drop low-confidence crumbs that are usually fan/echo, not speech."""
+    words = payload.get("result") or []
+    if not text or not isinstance(words, list) or not words:
+        return False
+    confs = [float(w.get("conf", 1.0)) for w in words if isinstance(w, dict)]
+    if not confs:
+        return False
+    avg = sum(confs) / len(confs)
+    return avg < 0.45 and len(text.split()) <= 2
 
 
 def asr_score(text: str) -> int:
@@ -1231,7 +1361,7 @@ def vosk_listen_worker(
         rec.SetWords(True)
         out_q.put("__ready__ en")
         index = find_input_device(device)
-        frames = 2000  # 125ms @ 16kHz
+        frames = 1600  # 100ms @ 16kHz — snappier partials than 125ms
         last_partial = ""
         with sd.RawInputStream(
             samplerate=16000,
@@ -1242,6 +1372,8 @@ def vosk_listen_worker(
         ) as stream:
             while not stop.is_set():
                 data, _overflow = stream.read(frames)
+                if _MIC_MUTE.is_set():
+                    continue
                 chunk = bytes(data)
                 kind, text = _vosk_step(rec, chunk)
                 if not text:
@@ -1304,8 +1436,8 @@ def run_listen_loop(
     model_path: Path,
     brain: Optional[CursorLampSession] = None,
     wake_word: bool = True,
-    hold_s: float = 0.9,
-    session_s: float = 45.0,
+    hold_s: float = 0.45,
+    session_s: float = 90.0,
     en_model_path: Optional[Path] = None,
 ) -> int:
     stop = threading.Event()
@@ -1325,7 +1457,7 @@ def run_listen_loop(
     catcher = SpeechCatcher(hold_s=hold_s)
     awake_until = 0.0
     if wake_word:
-        print("Mic on. Say hello lamp, wait until I say I'm here, then speak one full sentence.")
+        print("Mic on. Say hello lamp once; after I say yeah, keep talking.")
         print("Short commands (lights off / nod) skip the wake word. Typing still works.")
     else:
         print("Mic on (no wake word). Finish a full sentence. Short commands run immediately.")
@@ -1360,7 +1492,7 @@ def run_listen_loop(
                     awake_until = time.monotonic() + session_s
                     if not rest:
                         utter(lamp, wake_ack(ready))
-                        drain_queue(out_q)
+                        _listen_settle(catcher, out_q)
                     ready = rest
                 if ready:
                     local = direct_spoken_command(ready)
@@ -1368,7 +1500,7 @@ def run_listen_loop(
                     if local:
                         if apply_speech(lamp, ready, brain, listen_mode=True) == "quit":
                             return 0
-                        drain_queue(out_q)
+                        _listen_settle(catcher, out_q)
                         if chatting:
                             awake_until = time.monotonic() + session_s
                     elif chatting:
@@ -1377,10 +1509,10 @@ def run_listen_loop(
                         elif apply_speech(lamp, ready, brain, listen_mode=True) == "quit":
                             return 0
                         else:
-                            drain_queue(out_q)
+                            _listen_settle(catcher, out_q)
                             awake_until = time.monotonic() + session_s
                     else:
-                        print("Say hello lamp first, then a full sentence.")
+                        print("Say hello lamp first, then keep chatting.")
             if select.select([sys.stdin], [], [], 0)[0]:
                 line = sys.stdin.readline()
                 if line == "":
@@ -1423,6 +1555,7 @@ class LocalLamp:
         self.last_expression = ""
         self.motors = None
         self.rgb = None
+        self._motion_thread = None
 
     def start(self) -> None:
         if self.sim:
@@ -1469,6 +1602,9 @@ class LocalLamp:
         if self.sim:
             return
         deadline = time.monotonic() + timeout
+        thread = self._motion_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=max(0.05, deadline - time.monotonic()))
         for svc in (self.motors, self.rgb):
             if svc is None:
                 continue
@@ -1493,7 +1629,7 @@ class LocalLamp:
                         pass
                     break
 
-    def _play(self, recording: str) -> None:
+    def _play(self, recording: str, *, wait: bool = True) -> None:
         self.last_expression = recording
         if self.sim or self.motors is None:
             print(f"[sim] play {recording}")
@@ -1508,11 +1644,23 @@ class LocalLamp:
             # Official stop() does robot.disconnect(); robot=None; then
             # joins the worker. Playing on this thread means --ask cannot
             # return (and stop) while send_action is still looping.
-            play_fn(recording)
+            if wait:
+                play_fn(recording)
+                return
+            # Conversation path: nod while Cursor writes the spoken line.
+            thread = threading.Thread(
+                target=play_fn,
+                args=(recording,),
+                daemon=True,
+                name="lelamp-motion",
+            )
+            self._motion_thread = thread
+            thread.start()
             return
         self.motors.dispatch("play", recording)
-        time.sleep(0.05)
-        self._wait_hw()
+        if wait:
+            time.sleep(0.05)
+            self._wait_hw()
 
     def _apply_rgb(self, rgb: Tuple[int, int, int]) -> None:
         self.base_rgb = rgb
@@ -1535,7 +1683,7 @@ class LocalLamp:
             self.last_spoken = " ".join((text or "").split())
         return used
 
-    def apply(self, cmd: Command) -> str:
+    def apply(self, cmd: Command, *, wait_motion: bool = True) -> str:
         if cmd.kind == "noop":
             return ""
         if cmd.kind in {"quit", "help", "unknown"}:
@@ -1547,7 +1695,7 @@ class LocalLamp:
             )
         if cmd.kind == "express":
             rec = str(cmd.payload)
-            self._play(rec)
+            self._play(rec, wait=wait_motion)
             self._apply_rgb(EXPRESSION_RGB[rec])
             return cmd.reply
         if cmd.kind == "mood":
@@ -1604,8 +1752,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--listen-hold",
         type=float,
-        default=float(os.environ.get("LELAMP_LISTEN_HOLD", "0.9")),
-        help="seconds of silence before a sentence is committed (default 0.9)",
+        default=float(os.environ.get("LELAMP_LISTEN_HOLD", "0.45")),
+        help="seconds of silence before an unfinished sentence is committed (default 0.45)",
     )
     parser.add_argument("--download-vosk", action="store_true", help="download the English Vosk small model")
     parser.add_argument(
@@ -1665,7 +1813,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     brain = None
     if not args.no_cursor and (args.ask or os.environ.get("CURSOR_API_KEY")):
         brain = CursorLampSession(lamp)
+    voice_warm = None
+    if not args.sim:
+        voice_warm = threading.Thread(target=warm_tts, daemon=True, name="lelamp-voice")
+        voice_warm.start()
     lamp.start()
+    if voice_warm is not None:
+        voice_warm.join(timeout=20)
+    if brain is not None and (args.listen or args.ask):
+        brain.start()
     try:
         if not args.no_wake:
             lamp.wake()

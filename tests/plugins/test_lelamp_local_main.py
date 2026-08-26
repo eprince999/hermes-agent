@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
+import time
 
 from plugins.lelamp.local_main import (
     LocalLamp,
@@ -178,7 +180,7 @@ def test_main_sim_scripted_session(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
     assert local_main.main(["--sim", "--no-wake"]) == 0
     out = capsys.readouterr().out
-    assert "Yeah, I think so too." in out
+    assert "Yeah." in out
     assert "expression=nod" in out
     assert "Okay. I'll be right here." in out
 
@@ -272,8 +274,10 @@ def test_split_wake_and_complete_utterance():
     assert split_wake("lights off") == (False, "lights off")
     assert looks_complete_utterance("lights off") is True
     assert looks_complete_utterance("today") is False
+    assert looks_complete_utterance("what day is") is False
     assert looks_complete_utterance("what day is it") is True
     assert looks_complete_utterance("do you agree") is True
+    assert looks_complete_utterance("you good") is True
 
 
 def test_speech_catcher_waits_then_merges():
@@ -322,7 +326,7 @@ def test_listen_hello_does_not_replay_wake_up():
 
     apply_speech(lamp, "hello", Brain(), listen_mode=True)
     assert lamp.last_expression != "wake_up"
-    assert lamp.last_spoken == "I'm here. Go ahead."
+    assert lamp.last_spoken == "Yeah?"
 
 
 def test_show_stage_prints_current_stage(capsys):
@@ -387,7 +391,7 @@ def test_execute_lamp_tool_moves_and_lights():
         led_count=64,
         brightness=70,
     )
-    assert "Yeah, I think so too." in execute_lamp_tool(lamp, "express", {"feeling": "nod"})
+    assert "Yeah." in execute_lamp_tool(lamp, "express", {"feeling": "nod"})
     assert lamp.last_expression == "nod"
     execute_lamp_tool(lamp, "set_mood", {"mood": "lights off"})
     assert lamp.last_rgb == (0, 0, 0)
@@ -510,7 +514,7 @@ def test_english_keywords_parse_and_reply():
         led_count=64,
         brightness=70,
     )
-    assert "Yeah, I think so too." in lamp.apply(parse_line("nod"))
+    assert "Yeah." in lamp.apply(parse_line("nod"))
     lamp.apply(parse_line("lights off"))
     assert lamp.last_rgb == (0, 0, 0)
 
@@ -518,8 +522,10 @@ def test_english_keywords_parse_and_reply():
 def test_english_helpers():
     assert speech_lang("what day is it") == "en"
     assert speech_lang("q") == "en"
-    assert wake_ack("hello lamp") == "I'm here. Go ahead."
-    assert utterance_too_short("hi") is True
+    assert wake_ack("hello lamp") == "Yeah?"
+    assert utterance_too_short("uh") is True
+    assert utterance_too_short("you good") is False
+    assert utterance_too_short("yeah") is False
     assert utterance_too_short("what day is it") is False
     assert pick_asr(("final", "ah"), ("final", "what day is it"))[1] == "what day is it"
 
@@ -630,3 +636,121 @@ def test_speak_text_uses_piper_when_selected(monkeypatch, tmp_path):
     monkeypatch.setattr(local_main, "piper_model_path", lambda: model)
     monkeypatch.setattr(local_main, "_speak_piper", lambda text: "piper")
     assert speak_text("Hey. I'm here with you.", sim=False) == "piper"
+
+
+def test_yeah_is_a_nod():
+    cmd = parse_line("yeah")
+    assert cmd.kind == "express"
+    assert cmd.payload == "nod"
+
+
+def test_listen_hold_default_is_snappy():
+    from plugins.lelamp.local_main import build_parser
+
+    args = build_parser().parse_args([])
+    assert args.listen_hold == 0.45
+
+
+def test_speech_catcher_holds_trailing_is():
+    class Clock:
+        def __init__(self):
+            self.t = 0.0
+
+        def __call__(self):
+            return self.t
+
+    clock = Clock()
+    catcher = SpeechCatcher(hold_s=0.45, now=clock)
+    catcher.note_final("what day is")
+    assert catcher.take_ready() == ""
+    catcher.note_final("it")
+    assert catcher.take_ready() == "what day is it"
+
+
+def test_incomplete_short_phrase_commits_under_a_second():
+    class Clock:
+        def __init__(self):
+            self.t = 0.0
+
+        def __call__(self):
+            return self.t
+
+    clock = Clock()
+    catcher = SpeechCatcher(hold_s=0.45, now=clock)
+    catcher.note_final("what")
+    clock.t = 0.5
+    assert catcher.take_ready() == ""
+    clock.t = 0.75
+    assert catcher.take_ready() == "what"
+
+
+def test_vosk_drops_low_confidence_crumbs():
+    from plugins.lelamp.local_main import _vosk_too_noisy
+
+    noisy = {
+        "text": "the",
+        "result": [{"conf": 0.2, "word": "the"}],
+    }
+    assert _vosk_too_noisy(noisy, "the") is True
+    clear = {
+        "text": "what day is it",
+        "result": [{"conf": 0.9, "word": "what"}],
+    }
+    assert _vosk_too_noisy(clear, "what day is it") is False
+
+
+def test_piper_chunk_bytes_prefers_int16_property():
+    from plugins.lelamp.local_main import _piper_chunk_bytes
+
+    chunk = type("C", (), {"audio_int16_bytes": b"\x01\x00\x02\x00"})()
+    assert _piper_chunk_bytes(chunk) == b"\x01\x00\x02\x00"
+
+
+def test_speak_text_mutes_mic_while_playing(monkeypatch):
+    from plugins.lelamp import local_main
+
+    seen = []
+
+    def fake_espeak(text, volume):
+        seen.append(local_main._MIC_MUTE.is_set())
+        return "espeak-ng"
+
+    monkeypatch.setenv("LELAMP_TTS", "espeak-ng")
+    monkeypatch.setattr(local_main, "find_tts_engine", lambda: "espeak-ng")
+    monkeypatch.setattr(local_main, "_speak_espeak", fake_espeak)
+    assert speak_text("Hey.", sim=False) == "espeak-ng"
+    assert seen == [True]
+    assert local_main._MIC_MUTE.is_set() is False
+
+
+def test_conversation_play_returns_while_motion_runs():
+    lamp = LocalLamp(
+        sim=False,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    started = threading.Event()
+    released = threading.Event()
+
+    class Motors:
+        robot = object()
+        dispatched = []
+        _current_event = None
+
+        def _handle_play(self, recording_name):
+            started.set()
+            released.wait(timeout=2)
+
+        def wait_until_idle(self, timeout=None):
+            return True
+
+    lamp.motors = Motors()
+    t0 = time.monotonic()
+    lamp._play("nod", wait=False)
+    assert time.monotonic() - t0 < 0.2
+    assert started.wait(timeout=1.0)
+    assert lamp.last_expression == "nod"
+    released.set()
+    lamp._wait_hw(timeout=2.0)
