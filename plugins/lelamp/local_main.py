@@ -1,28 +1,34 @@
-"""LeLamp local agent — Stage 2 + music folder, no OpenAI, no LiveKit.
+"""LeLamp local agent — Stages 1–2, no OpenAI, no LiveKit.
 
 Always copy onto the Pi as ``~/lelamp_runtime/local_main.py``.
-Do not rename the runnable file. Snapshot 2 is the keyword-only archive::
+Do not rename the runnable file per stage. Snapshot instead::
 
     mkdir -p ~/lelamp_runtime/lamp_snapshots
-    cp local_main.py lamp_snapshots/stage2.py
+    cp local_main.py lamp_snapshots/stage1-keyboard.py   # after a good test
+    git add local_main.py && git commit -m "lamp: stage 1 ok"
+
+Rollback::
+
+    cp lamp_snapshots/stage1-keyboard.py local_main.py
 
 Keep official ``main.py`` untouched. From the runtime repo root:
 
     sudo uv run python local_main.py
     sudo uv run python local_main.py --sim
     sudo uv run python local_main.py --say 你好 --say 关灯
-    sudo uv run python local_main.py --say 音乐
     sudo uv run python local_main.py --download-vosk
     sudo uv run python local_main.py --listen
-    sudo uv run python local_main.py --snapshot
+    sudo uv run python local_main.py --snapshot          # save as lamp_snapshots/stage2.py
+    sudo uv run python local_main.py --snapshot stage2
 
 Type Chinese commands, or with ``--listen`` speak them to the ReSpeaker.
-Say 音乐 to play a random file from the music/ folder. ``q`` or Ctrl+C quits.
+``q`` or Ctrl+C quits.
 
 Roadmap:
   1. keyboard + motors + RGB
-  2. on-device speech keywords (Vosk, no cloud)
-  3. music folder random play (this file)
+  2. on-device speech keywords (this file, Vosk, no cloud)
+  3. a Chinese model you choose (DeepSeek / Qwen / Ollama), not OpenAI
+  4. spoken replies on the speaker
 """
 
 from __future__ import annotations
@@ -31,13 +37,10 @@ import argparse
 import json
 import os
 import queue
-import random
 import select
 import shutil
-import subprocess
 import sys
 import threading
-import time
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -47,7 +50,7 @@ from urllib.request import urlretrieve
 
 # Bump when a stage lands. Printed at startup so a snapshot is identifiable.
 AGENT_STAGE = 2
-AGENT_LABEL = "keyboard + vosk listen + music"
+AGENT_LABEL = "keyboard + vosk listen"
 
 
 def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = None) -> Path:
@@ -183,35 +186,9 @@ LIGHT_ONLY: Dict[str, str] = {
     "专注": "focus",
 }
 
-MUSIC_START = {
-    "音乐", "放音乐", "播放音乐", "来点音乐", "跳舞", "放歌",
-    "music", "play music", "playmusic", "dance",
-}
-MUSIC_STOP = {
-    "停止音乐", "别放了", "关掉音乐",
-    "stop music", "stopmusic", "stop dancing",
-}
-DANCE_RECORDINGS = ("happy_wiggle", "nod", "excited")
-_BUILTIN_TRACKS = (
-    ("pulse_100.wav", 100, (0, 3, 7, 10)),
-    ("bounce_120.wav", 120, (0, 4, 7, 12)),
-    ("spark_140.wav", 140, (0, 5, 7, 9)),
-)
-_DANCE_HOME = {
-    "base_yaw.pos": 0.0,
-    "wrist_pitch.pos": 22.0,
-    "wrist_roll.pos": 0.0,
-}
-_DANCE_LIMITS = {
-    "base_yaw.pos": (-90.0, 90.0),
-    "wrist_roll.pos": (-45.0, 45.0),
-    "wrist_pitch.pos": (-20.0, 50.0),
-}
-
 HELP_TEXT = """本地台灯 Stage 2（无 OpenAI）
 动作：你好 / 点头 / 摇头 / 好奇 / 张望 / 开心 / 兴奋 / 惊讶 / 害羞 / 难过 / 待机
 灯光：开灯 / 关灯 / 暖光 / 冷光 / 自动 / 亮一点 / 暗一点
-音乐：音乐 / 放音乐 / 跳舞（随机播放 music/ 文件夹）  停止音乐
 说话：启动时加 --listen（先 --download-vosk）
 其它：status  rgb 255 176 80  help  q
 """
@@ -284,12 +261,6 @@ def parse_line(line: str) -> Command:
     if low in {"最暗"}:
         return Command("brightness_set", 20, "暗下来。")
 
-    compact = _compact_speech(text)
-    if compact in MUSIC_START or low in MUSIC_START or text in MUSIC_START:
-        return Command("music", None, "放音乐。")
-    if compact in MUSIC_STOP or low in MUSIC_STOP or text in MUSIC_STOP:
-        return Command("music_stop", None, "停了。")
-
     parts = text.split()
     if parts[0].lower() == "volume" and len(parts) == 2 and parts[1].isdigit():
         vol = max(0, min(100, int(parts[1])))
@@ -321,7 +292,7 @@ def parse_line(line: str) -> Command:
         return Command(
             "unknown",
             text,
-            "我还没学会这句。可以说：你好、点头、暖光、关灯、音乐。输入 help 看全部。",
+            "我还没学会这句。可以说：你好、点头、暖光、关灯。输入 help 看全部。",
         )
     spoken = {
         "wake_up": "你好呀，我是台灯。",
@@ -341,14 +312,7 @@ def parse_line(line: str) -> Command:
 
 def command_phrases() -> List[str]:
     extra = ("亮一点", "亮一些", "亮点", "暗一点", "暗一些", "暗点", "最亮", "最暗", "帮助", "退出")
-    phrases = (
-        set(LIGHT_ONLY)
-        | set(ALIASES)
-        | set(RECORDINGS)
-        | set(MUSIC_START)
-        | set(MUSIC_STOP)
-        | set(extra)
-    )
+    phrases = set(LIGHT_ONLY) | set(ALIASES) | set(RECORDINGS) | set(extra)
     return sorted(phrases, key=lambda item: (-len(item), item))
 
 
@@ -379,158 +343,6 @@ def extract_spoken_command(transcript: str) -> Optional[str]:
             best_pos = pos
             best_len = len(phrase)
     return best_phrase
-
-
-def _bin(name: str) -> Optional[str]:
-    found = shutil.which(name)
-    if found:
-        return found
-    candidate = Path("/usr/bin") / name
-    if candidate.is_file() and os.access(candidate, os.X_OK):
-        return str(candidate)
-    return None
-
-
-def _clamp_dance(pose: Dict[str, float]) -> Dict[str, float]:
-    out = dict(pose)
-    for key, (lo, hi) in _DANCE_LIMITS.items():
-        if key in out:
-            out[key] = max(lo, min(hi, float(out[key])))
-    return out
-
-
-def music_dir() -> Path:
-    override = (os.environ.get("LELAMP_MUSIC_DIR") or "").strip()
-    if override:
-        return Path(override).expanduser()
-    return Path(__file__).resolve().parent / "music"
-
-
-def ensure_music_dir(folder: Optional[Path] = None) -> Path:
-    root = folder or music_dir()
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-def write_beat_wav(
-    path: Path,
-    *,
-    bpm: int,
-    notes: Sequence[int],
-    seconds: float = 12.0,
-    rate: int = 16000,
-) -> Path:
-    import math
-    import struct
-    import wave
-
-    n = int(seconds * rate)
-    spb = max(1.0, (60.0 / max(40, int(bpm))) * rate)
-    frames = bytearray()
-    note_count = max(1, len(notes))
-    for i in range(n):
-        beat = i / spb
-        beat_i = int(beat)
-        pos = beat - beat_i
-        t = i / rate
-        kick = 0.0
-        if pos < 0.14:
-            kick = math.sin(2 * math.pi * 75 * t) * (1.0 - pos / 0.14)
-            if beat_i % 2:
-                kick *= 0.45
-        hat = ((i * 17) % 11 / 11 - 0.5) * (0.18 if pos < 0.05 else 0.0)
-        degree = notes[beat_i % note_count]
-        freq = 196.0 * (2 ** (degree / 12.0))
-        mel = 0.22 * math.sin(2 * math.pi * freq * t) * max(0.0, 1.0 - pos)
-        sample = max(-1.0, min(1.0, kick * 0.75 + hat + mel))
-        frames.extend(struct.pack("<h", int(sample * 12000)))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with wave.open(str(path), "w") as fh:
-        fh.setnchannels(1)
-        fh.setsampwidth(2)
-        fh.setframerate(rate)
-        fh.writeframes(bytes(frames))
-    return path
-
-
-def ensure_builtin_music(dest: Optional[Path] = None) -> List[Path]:
-    folder = dest or (ensure_music_dir() / ".builtin")
-    folder.mkdir(parents=True, exist_ok=True)
-    paths: List[Path] = []
-    for name, bpm, notes in _BUILTIN_TRACKS:
-        path = folder / name
-        if not path.is_file() or path.stat().st_size < 2000:
-            write_beat_wav(path, bpm=bpm, notes=notes)
-        paths.append(path)
-    return paths
-
-
-def list_music_files(folder: Optional[Path] = None) -> List[Path]:
-    root = folder or music_dir()
-    if not root.is_dir():
-        return []
-    allowed = {".wav", ".mp3", ".ogg", ".flac", ".m4a"}
-    files: List[Path] = []
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(root)
-        if any(part.startswith(".") for part in rel.parts):
-            continue
-        if path.suffix.lower() in allowed:
-            files.append(path)
-    return sorted(files)
-
-
-def bpm_from_name(path: Path) -> Optional[int]:
-    stem = path.stem
-    if "_" in stem:
-        tail = stem.rsplit("_", 1)[-1]
-        if tail.isdigit():
-            value = int(tail)
-            if 40 <= value <= 220:
-                return value
-    return None
-
-
-def pick_random_track(folder: Optional[Path] = None) -> Tuple[Path, int]:
-    root = ensure_music_dir(folder)
-    files = list_music_files(root)
-    if not files:
-        files = ensure_builtin_music(root / ".builtin")
-        print(f"music 文件夹是空的，把 wav/mp3 放到 {root}")
-    if not files:
-        raise RuntimeError(f"no music files in {root}")
-    path = random.choice(files)
-    return path, bpm_from_name(path) or 120
-
-
-def start_music_player(path: Path) -> Optional["subprocess.Popen[bytes]"]:
-    suffix = path.suffix.lower()
-    candidates: List[Tuple[str, List[str]]] = []
-    if suffix == ".wav":
-        candidates.append(("aplay", ["-q"]))
-        candidates.append(("paplay", []))
-    candidates.extend(
-        (
-            ("ffplay", ["-nodisp", "-autoexit", "-loglevel", "quiet"]),
-            ("mpv", ["--no-video", "--really-quiet"]),
-            ("mpg123", ["-q"]),
-        )
-    )
-    for name, extra in candidates:
-        binary = _bin(name)
-        if not binary:
-            continue
-        try:
-            return subprocess.Popen(
-                [binary, *extra, str(path)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except OSError:
-            continue
-    return None
 
 
 def vosk_model_dir() -> Path:
@@ -641,19 +453,11 @@ def dispatch_text(lamp: LocalLamp, raw: str) -> str:
 
 def apply_speech(lamp: LocalLamp, transcript: str) -> str:
     print(f"灯< {transcript}")
-    compact = _compact_speech(transcript)
-    if lamp.music_playing:
-        phrase = extract_spoken_command(transcript)
-        cmd = parse_line(phrase or compact or transcript)
-        if cmd.kind in {"music_stop", "quit", "music"}:
-            return dispatch_text(lamp, phrase or transcript)
-        print("正在跳舞")
-        return "busy"
     phrase = extract_spoken_command(transcript)
     if not phrase:
         print(f"听到「{transcript}」，但不是灯的指令。")
         return "unknown"
-    if phrase != compact:
+    if phrase != _compact_speech(transcript):
         print(f"听成：{phrase}")
     return dispatch_text(lamp, phrase)
 
@@ -667,7 +471,7 @@ def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path)
         daemon=True,
     )
     worker.start()
-    print("麦克风线程已开。请说：你好、点头、关灯、音乐。打字回车也可以。")
+    print("麦克风线程已开。请说：你好、点头、关灯。打字回车也可以。")
     try:
         while True:
             try:
@@ -721,17 +525,10 @@ class LocalLamp:
         self.base_rgb: Tuple[int, int, int] = MOOD_RGB["warm"]
         self.last_rgb: Tuple[int, int, int] = (0, 0, 0)
         self.last_expression = ""
-        self.last_music = ""
         self.motors = None
         self.rgb = None
-        self._music_proc = None
-        self._music_stop = threading.Event()
-        self._dance_thread = None
-        self._music_playing = False
 
     def start(self) -> None:
-        folder = ensure_music_dir()
-        print(f"music 文件夹 {folder}")
         if self.sim:
             print("[sim] skip motors/rgb connect")
             return
@@ -753,7 +550,6 @@ class LocalLamp:
         print(f"motors on {self.port}  rgb leds={self.led_count}")
 
     def stop(self) -> None:
-        self.stop_music()
         for svc in (self.motors, self.rgb):
             if svc is None:
                 continue
@@ -766,7 +562,7 @@ class LocalLamp:
                         pass
                     break
 
-    def _play(self, recording: str, *, wait: bool = True) -> None:
+    def _play(self, recording: str) -> None:
         self.last_expression = recording
         if self.sim or self.motors is None:
             print(f"[sim] play {recording}")
@@ -782,125 +578,6 @@ class LocalLamp:
             return
         self.rgb.dispatch("solid", scaled)
 
-    @property
-    def music_playing(self) -> bool:
-        return bool(self._music_playing)
-
-    def _present_action(self) -> Optional[Dict[str, float]]:
-        robot = getattr(self.motors, "robot", None) if self.motors is not None else None
-        bus = getattr(robot, "bus", None) if robot is not None else None
-        if bus is None:
-            return None
-        try:
-            present = bus.sync_read("Present_Position")
-        except Exception as exc:
-            print(f"姿态读取失败: {exc}")
-            return None
-        return {f"{name}.pos": float(val) for name, val in present.items()}
-
-    def _flash_rgb(self, rgb: Tuple[int, int, int]) -> None:
-        scaled = _scale_rgb(rgb, self.brightness)
-        self.last_rgb = scaled
-        if self.sim or self.rgb is None:
-            print(f"[sim] rgb {scaled} brightness={self.brightness}")
-            return
-        self.rgb.dispatch("solid", scaled)
-
-    def _dance_home(self) -> Dict[str, float]:
-        present = None if self.sim else self._present_action()
-        home = dict(present) if present else dict(_DANCE_HOME)
-        home.setdefault("base_yaw.pos", 0.0)
-        home.setdefault("wrist_pitch.pos", 22.0)
-        home.setdefault("wrist_roll.pos", 0.0)
-        return home
-
-    def _dance_step(self, beat: int, home: Dict[str, float]) -> None:
-        sign = 1 if beat % 2 == 0 else -1
-        self._flash_rgb(MOOD_RGB["happy"] if sign > 0 else MOOD_RGB["talk"])
-        robot = getattr(self.motors, "robot", None) if self.motors is not None else None
-        send = getattr(robot, "send_action", None) if robot is not None else None
-        if callable(send):
-            action = dict(home)
-            action["base_yaw.pos"] = float(home.get("base_yaw.pos", 0.0)) + 12.0 * sign
-            action["wrist_pitch.pos"] = float(home.get("wrist_pitch.pos", 22.0)) + 9.0 * sign
-            action["wrist_roll.pos"] = float(home.get("wrist_roll.pos", 0.0)) - 7.0 * sign
-            try:
-                send(_clamp_dance(action))
-            except Exception as exc:
-                print(f"跳舞失败: {exc}")
-        if beat % 2 == 0:
-            self._play(DANCE_RECORDINGS[beat % len(DANCE_RECORDINGS)], wait=False)
-
-    def _dance_loop(self, bpm: int) -> None:
-        period = 60.0 / max(40, min(220, int(bpm)))
-        home = self._dance_home()
-        beat = 0
-        next_beat = time.monotonic()
-        while not self._music_stop.is_set():
-            now = time.monotonic()
-            if now < next_beat:
-                time.sleep(min(0.03, next_beat - now))
-                continue
-            self._dance_step(beat, home)
-            beat += 1
-            next_beat += period
-            proc = self._music_proc
-            if proc is not None and proc.poll() is not None:
-                break
-        self._music_playing = False
-
-    def play_music(self) -> str:
-        self.stop_music()
-        try:
-            path, bpm = pick_random_track()
-        except RuntimeError as exc:
-            print(str(exc))
-            return "没有音乐"
-        self.last_music = path.name
-        self.last_expression = "happy_wiggle"
-        self._apply_rgb(MOOD_RGB["happy"])
-        print(f"music {path.name} bpm={bpm}")
-        self._music_stop.clear()
-        self._music_playing = True
-        if self.sim:
-            self._dance_step(0, self._dance_home())
-            return f"music {path.name}"
-        proc = start_music_player(path)
-        self._music_proc = proc
-        if proc is None:
-            print("没有播放器（需要 aplay 或 ffplay）")
-        self._dance_thread = threading.Thread(
-            target=self._dance_loop,
-            args=(bpm,),
-            daemon=True,
-            name="lelamp-dance",
-        )
-        self._dance_thread.start()
-        return f"music {path.name}"
-
-    def stop_music(self) -> str:
-        self._music_stop.set()
-        proc = self._music_proc
-        self._music_proc = None
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=2)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-        thread = self._dance_thread
-        self._dance_thread = None
-        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=2.5)
-        was = self._music_playing or bool(self.last_music)
-        self._music_playing = False
-        if was:
-            print("music stop")
-        return "停了。"
-
     def apply(self, cmd: Command) -> str:
         if cmd.kind == "noop":
             return ""
@@ -909,13 +586,8 @@ class LocalLamp:
         if cmd.kind == "status":
             return (
                 f"sim={self.sim} expression={self.last_expression or '-'} "
-                f"rgb={self.last_rgb} brightness={self.brightness} "
-                f"music={self.last_music or '-'}"
+                f"rgb={self.last_rgb} brightness={self.brightness}"
             )
-        if cmd.kind == "music":
-            return self.play_music()
-        if cmd.kind == "music_stop":
-            return self.stop_music()
         if cmd.kind == "express":
             rec = str(cmd.payload)
             self._play(rec)
@@ -954,7 +626,7 @@ class LocalLamp:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="LeLamp local Stage 2 + music folder (no OpenAI)")
+    parser = argparse.ArgumentParser(description="LeLamp local Stages 1–2 (no OpenAI)")
     parser.add_argument("--sim", action="store_true", help="no motors/LED, print actions")
     parser.add_argument("--port", default=os.environ.get("LELAMP_PORT", "/dev/ttyACM0"))
     parser.add_argument("--id", dest="lamp_id", default=os.environ.get("LELAMP_ID", "lelamp"))
