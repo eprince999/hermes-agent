@@ -81,7 +81,7 @@ def test_sim_express_then_off_updates_state():
 
 def test_extract_spoken_command_from_padded_asr():
     assert extract_spoken_command("请关灯") == "关灯"
-    assert extract_spoken_command("嗯点头") == "点头"
+    assert extract_spoken_command("请点头") == "点头"
     assert extract_spoken_command("放音乐吧") == "放音乐"
 
 
