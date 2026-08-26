@@ -332,10 +332,10 @@ def test_show_stage_prints_current_stage(capsys):
 def test_snapshot_saves_stage2_copy(tmp_path, capsys):
     from plugins.lelamp import local_main
 
-    dest = local_main.snapshot_current("stage4", dest_dir=tmp_path)
-    assert dest.name == "stage4.py"
+    dest = local_main.snapshot_current("stage3", dest_dir=tmp_path)
+    assert dest.name == "stage3.py"
     assert dest.is_file()
-    assert "AGENT_STAGE = 4" in dest.read_text(encoding="utf-8")
+    assert "AGENT_STAGE = 3" in dest.read_text(encoding="utf-8")
     assert "saved snapshot" in capsys.readouterr().out
     args = local_main.build_parser().parse_args(["--snapshot"])
     assert args.snapshot == ""
@@ -408,12 +408,21 @@ def test_volume_keywords_and_status():
         led_count=64,
         brightness=70,
     )
+    assert lamp.volume == 100
     assert parse_line("大声").kind == "volume_delta"
     lamp.apply(parse_line("大声"))
     assert lamp.volume == 100
     lamp.apply(parse_line("volume 40"))
     assert lamp.volume == 40
     assert "volume=40" in lamp.apply(parse_line("status"))
+
+
+def test_espeak_amplitude_is_loud():
+    from plugins.lelamp.local_main import _espeak_cmd
+
+    cmd = _espeak_cmd("/usr/bin/espeak-ng", "你好", 100)
+    assert "-a" in cmd
+    assert int(cmd[cmd.index("-a") + 1]) == 200
 
 
 def test_speak_text_sim_prints(capsys):
@@ -451,5 +460,5 @@ def test_main_sim_speak_without_cursor(capsys):
 
     assert local_main.main(["--sim", "--no-wake", "--speak", "你好，我是台灯"]) == 0
     out = capsys.readouterr().out
-    assert "stage 4" in out
+    assert "stage 3" in out
     assert "[sim] speak 你好，我是台灯" in out

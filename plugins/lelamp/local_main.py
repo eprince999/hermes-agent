@@ -1,4 +1,4 @@
-"""LeLamp local agent — Stages 1–4, no OpenAI, no LiveKit.
+"""LeLamp local agent — Stages 1–3, no OpenAI, no LiveKit.
 
 Always copy onto the Pi as ``~/lelamp_runtime/local_main.py``.
 Do not rename the runnable file per stage. Snapshot instead::
@@ -15,14 +15,13 @@ Keep official ``main.py`` untouched. From the runtime repo root:
     sudo uv run python local_main.py --snapshot
 
 Stage 3 uses Cursor's official API (cursor-sdk + CURSOR_API_KEY from
-https://cursor.com/dashboard/api). Stage 4 reads replies on the ReSpeaker
+https://cursor.com/dashboard/api) and reads replies on the ReSpeaker
 with espeak-ng (or piper if LELAMP_PIPER_MODEL is set). No OpenAI TTS.
 
 Roadmap:
   1. keyboard + motors + RGB
   2. on-device speech keywords (Vosk)
-  3. Cursor API as the brain
-  4. spoken replies on the speaker (this file)
+  3. Cursor API as the brain + speaker (this file)
 """
 
 from __future__ import annotations
@@ -47,7 +46,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from urllib.request import urlretrieve
 
 # Bump when a stage lands. Printed at startup so a snapshot is identifiable.
-AGENT_STAGE = 4
+AGENT_STAGE = 3
 AGENT_LABEL = "keyboard + vosk + cursor-sdk + tts"
 
 
@@ -217,10 +216,10 @@ WAKE_PHRASES = (
 _COMPLETE_ENDINGS = ("吗", "呢", "吧", "啊", "呀", "了", "哦", "嘛", "哈")
 _POLITE_PREFIXES = ("麻烦你", "请你", "帮我", "麻烦", "劳驾", "请")
 
-HELP_TEXT = """本地台灯 Stage 4（Cursor API + 喇叭，无 OpenAI）
+HELP_TEXT = """本地台灯 Stage 3（Cursor API + 喇叭，无 OpenAI）
 动作：你好 / 点头 / 摇头 / 好奇 / 张望 / 开心 / 兴奋 / 惊讶 / 害羞 / 难过 / 待机
 灯光：开灯 / 关灯 / 暖光 / 冷光 / 自动 / 亮一点 / 暗一点
-喇叭：大声 / 小声 / volume 80；先测：--speak 你好
+喇叭：大声 / 小声 / volume 100；先测：--speak 你好
 说话：先说「你好台灯」，再说完整的一句。短指令（关灯/点头）立刻做。
       同意会点头，不同意会摇头。
 其它：status  rgb 255 176 80  help  q
@@ -569,9 +568,28 @@ def find_tts_engine() -> str:
 
 
 def _espeak_cmd(binary: str, text: str, volume: int) -> List[str]:
-    amplitude = max(10, min(200, round(max(0, min(100, volume)) * 2)))
+    # espeak -a is 0-200. Keep it at the top of that range so the ReSpeaker
+    # is not whisper-quiet; ALSA mixer is raised separately.
+    amplitude = max(140, min(200, round(max(0, min(100, volume)) * 2)))
     voice = os.environ.get("LELAMP_ESPEAK_VOICE", "zh")
     return [binary, "-v", voice, "-a", str(amplitude), "--", text]
+
+
+def set_system_volume(percent: int) -> None:
+    """Unmute ReSpeaker Line/PCM and set hardware gain. Quiet-by-default on Pi."""
+    pct = f"{max(0, min(100, int(percent)))}%"
+    controls = ("PCM", "Master", "Line", "Line DAC", "Speaker", "Playback", "HP", "Digital")
+    cards: List[Optional[str]] = [None, "0", "1", "2"]
+    for card in cards:
+        for control in controls:
+            cmd = ["amixer", "-q"]
+            if card is not None:
+                cmd.extend(["-c", card])
+            cmd.extend(["sset", control, pct, "unmute"])
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=3)
+            except Exception:
+                pass
 
 
 def _speak_espeak(text: str, volume: int) -> str:
@@ -628,7 +646,7 @@ def speak_text(
     text: str,
     *,
     sim: bool = False,
-    volume: int = 80,
+    volume: int = 100,
     enabled: bool = True,
 ) -> str:
     """Speak Chinese on the default ALSA device (ReSpeaker). No OpenAI."""
@@ -1154,7 +1172,7 @@ class LocalLamp:
         lamp_id: str,
         led_count: int,
         brightness: int,
-        volume: int = 80,
+        volume: int = 100,
         speak_enabled: bool = True,
     ) -> None:
         self.sim = sim
@@ -1194,6 +1212,7 @@ class LocalLamp:
         while time.monotonic() < deadline and getattr(self.motors, "robot", None) is None:
             time.sleep(0.05)
         print(f"motors on {self.port}  rgb leds={self.led_count}")
+        set_system_volume(self.volume)
 
     def _service_busy(self, svc) -> bool:
         if svc is None:
@@ -1318,9 +1337,13 @@ class LocalLamp:
             return cmd.reply
         if cmd.kind == "volume":
             self.volume = int(cmd.payload)
+            if not self.sim:
+                set_system_volume(self.volume)
             return cmd.reply
         if cmd.kind == "volume_delta":
             self.volume = max(0, min(100, self.volume + int(cmd.payload)))
+            if not self.sim:
+                set_system_volume(self.volume)
             return f"{cmd.reply} 音量 {self.volume}%"
         return cmd.reply
 
@@ -1334,7 +1357,7 @@ class LocalLamp:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="LeLamp local Stages 1–4 (Cursor API + speaker, no OpenAI)")
+    parser = argparse.ArgumentParser(description="LeLamp local Stages 1–3 (Cursor API + speaker, no OpenAI)")
     parser.add_argument("--sim", action="store_true", help="no motors/LED, print actions")
     parser.add_argument("--port", default=os.environ.get("LELAMP_PORT", "/dev/ttyACM0"))
     parser.add_argument("--id", dest="lamp_id", default=os.environ.get("LELAMP_ID", "lelamp"))
@@ -1350,7 +1373,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--download-vosk", action="store_true", help="download offline Chinese Vosk model")
     parser.add_argument("--say", action="append", default=[], help="inject a spoken phrase (repeatable)")
-    parser.add_argument("--speak", action="append", default=[], help="Stage 4: speak this sentence on the speaker")
+    parser.add_argument("--speak", action="append", default=[], help="speak this sentence on the speaker")
     parser.add_argument("--no-speak", action="store_true", help="print replies only, do not use the speaker")
     parser.add_argument("--device", type=int, default=None, help="sounddevice input index")
     parser.add_argument("--model", type=Path, default=None, help="path to vosk-model-small-cn-0.22")
