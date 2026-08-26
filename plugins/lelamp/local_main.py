@@ -11,6 +11,9 @@ Keep official ``main.py`` untouched. From the runtime repo root:
     sudo uv run python local_main.py
     sudo uv run python local_main.py --listen
     sudo uv run python local_main.py --speak "你好，我是台灯"
+    sudo uv run python local_main.py --speak "hello I'm the lamp"
+    sudo uv run python local_main.py --download-vosk
+    sudo uv run python local_main.py --ask "Do you agree warm light is nicer?"
     sudo uv run python local_main.py --ask "把灯调成暖光并点点头"
     sudo uv run python local_main.py --snapshot
 
@@ -47,7 +50,7 @@ from urllib.request import urlretrieve
 
 # Bump when a stage lands. Printed at startup so a snapshot is identifiable.
 AGENT_STAGE = 3
-AGENT_LABEL = "keyboard + vosk + cursor-sdk + tts"
+AGENT_LABEL = "keyboard + vosk(zh+en) + cursor-sdk + tts"
 
 
 def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = None) -> Path:
@@ -89,6 +92,12 @@ ALIASES: Dict[str, str] = {
     "早上好": "wake_up",
     "晚上好": "wake_up",
     "打招呼": "wake_up",
+    "hey": "wake_up",
+    "good morning": "wake_up",
+    "good evening": "wake_up",
+    "agree": "nod",
+    "disagree": "headshake",
+    "nope": "headshake",
     "nod": "nod",
     "yes": "nod",
     "ok": "nod",
@@ -100,6 +109,7 @@ ALIASES: Dict[str, str] = {
     "嗯": "nod",
     "headshake": "headshake",
     "no": "headshake",
+    "shake": "headshake",
     "摇头": "headshake",
     "不行": "headshake",
     "不要": "headshake",
@@ -161,6 +171,16 @@ MOOD_RGB: Dict[str, Tuple[int, int, int]] = {
 }
 
 LIGHT_ONLY: Dict[str, str] = {
+    "lights on": "auto",
+    "light on": "auto",
+    "turn on": "auto",
+    "lights off": "off",
+    "light off": "off",
+    "turn off": "off",
+    "warm light": "warm",
+    "cool light": "cool",
+    "night light": "night",
+    "focus light": "focus",
     "开灯": "auto",
     "开": "auto",
     "打开灯": "auto",
@@ -197,6 +217,20 @@ EXPRESSION_REPLIES: Dict[str, str] = {
     "idle": "我歇一会儿。",
 }
 
+EXPRESSION_REPLIES_EN: Dict[str, str] = {
+    "wake_up": "Hi, I'm the lamp.",
+    "nod": "Okay.",
+    "headshake": "No, I won't.",
+    "curious": "Hmm?",
+    "scanning": "Let me look.",
+    "excited": "Yay!",
+    "happy_wiggle": "Happy!",
+    "shock": "Whoa!",
+    "shy": "Oh, a bit shy.",
+    "sad": "Aw.",
+    "idle": "I'll rest.",
+}
+
 # Only for express(feeling=...), not for whole-utterance parse_line.
 AGREE_FEELINGS = {
     "同意", "赞同", "赞成", "可以", "好啊", "没问题", "对的",
@@ -212,21 +246,35 @@ WAKE_PHRASES = (
     "嘿台灯",
     "嗨台灯",
     "hello台灯",
+    "hello lamp",
+    "hey lamp",
+    "hi lamp",
+    "hello lelamp",
+    "hey lelamp",
 )
 _COMPLETE_ENDINGS = ("吗", "呢", "吧", "啊", "呀", "了", "哦", "嘛", "哈")
-_POLITE_PREFIXES = ("麻烦你", "请你", "帮我", "麻烦", "劳驾", "请")
+_POLITE_PREFIXES = (
+    "麻烦你", "请你", "帮我", "麻烦", "劳驾", "请",
+    "please", "can you", "could you",
+)
+_EN_QUESTION_STARTS = {
+    "what", "when", "why", "how", "who", "where",
+    "do", "does", "can", "could", "is", "are", "please",
+}
 
-HELP_TEXT = """本地台灯 Stage 3（Cursor API + 喇叭，无 OpenAI）
-动作：你好 / 点头 / 摇头 / 好奇 / 张望 / 开心 / 兴奋 / 惊讶 / 害羞 / 难过 / 待机
-灯光：开灯 / 关灯 / 暖光 / 冷光 / 自动 / 亮一点 / 暗一点
-喇叭：大声 / 小声 / volume 100；先测：--speak 你好
-说话：先说「你好台灯」，再说完整的一句。短指令（关灯/点头）立刻做。
-      同意会点头，不同意会摇头。
-其它：status  rgb 255 176 80  help  q
+HELP_TEXT = """Stage 3 lamp / 本地台灯 Stage 3（Cursor API + speaker, no OpenAI）
+Motion: 你好 hello / 点头 nod / 摇头 no / 好奇 / 开心 happy / 待机 idle
+Light: 开灯 lights on / 关灯 lights off / 暖光 warm / 冷光 cool / brighter / dimmer
+Speaker: 大声 louder / 小声 quieter / volume 100；test: --speak hello
+Talk: say 你好台灯 or hello lamp, then one full sentence.
+      Agree → nod. Disagree → shake head.
+Other: status  rgb 255 176 80  help  q
 """
 
 VOSK_MODEL_NAME = "vosk-model-small-cn-0.22"
 VOSK_MODEL_URL = f"https://alphacephei.com/vosk/models/{VOSK_MODEL_NAME}.zip"
+VOSK_EN_MODEL_NAME = "vosk-model-small-en-us-0.15"
+VOSK_EN_MODEL_URL = f"https://alphacephei.com/vosk/models/{VOSK_EN_MODEL_NAME}.zip"
 
 
 @dataclass(frozen=True)
@@ -260,6 +308,31 @@ def resolve_expression(name: str) -> str:
     raise ValueError(raw)
 
 
+def speech_lang(text: str) -> str:
+    raw = text or ""
+    cjk = sum(1 for ch in raw if "\u4e00" <= ch <= "\u9fff")
+    latin = sum(1 for ch in raw if ("A" <= ch <= "Z") or ("a" <= ch <= "z"))
+    return "en" if latin > cjk else "zh"
+
+
+def spoken_for(recording: str, source: str) -> str:
+    table = EXPRESSION_REPLIES_EN if speech_lang(source) == "en" else EXPRESSION_REPLIES
+    return table.get(recording, recording)
+
+
+def wake_ack(transcript: str) -> str:
+    return "I'm here." if speech_lang(transcript) == "en" else "我在。"
+
+
+def utterance_too_short(text: str) -> bool:
+    compact = _compact_speech(text)
+    if not compact:
+        return True
+    if speech_lang(compact) == "en":
+        return len(compact.split()) < 3
+    return len(compact) < 4
+
+
 def _scale_rgb(rgb: Tuple[int, int, int], brightness: int) -> Tuple[int, int, int]:
     b = max(0, min(100, int(brightness)))
     r, g, bl = rgb
@@ -277,30 +350,32 @@ def parse_line(line: str) -> Command:
         return Command("noop", None, "")
 
     low = text.lower()
-    if low in {"q", "quit", "exit", "退出"}:
-        return Command("quit", None, "好，我先歇着。")
+    english = speech_lang(text) == "en"
+    if low in {"q", "quit", "exit", "退出", "bye", "goodbye"}:
+        return Command("quit", None, "See you." if english else "好，我先歇着。")
     if low in {"help", "h", "?", "帮助"}:
         return Command("help", None, HELP_TEXT.strip())
     if low in {"status", "状态"}:
         return Command("status", None, "")
 
-    if low in {"亮一点", "亮一些", "亮点"}:
-        return Command("brightness_delta", 15, "亮一点。")
-    if low in {"暗一点", "暗一些", "暗点"}:
-        return Command("brightness_delta", -15, "暗一点。")
-    if low in {"最亮"}:
-        return Command("brightness_set", 100, "最亮。")
-    if low in {"最暗"}:
-        return Command("brightness_set", 20, "暗下来。")
-    if low in {"大声", "大声点", "音量大"}:
-        return Command("volume_delta", 20, "大声一点。")
-    if low in {"小声", "小声点", "音量小"}:
-        return Command("volume_delta", -20, "小声一点。")
+    if low in {"亮一点", "亮一些", "亮点", "brighter", "brighter please"}:
+        return Command("brightness_delta", 15, "Brighter." if english else "亮一点。")
+    if low in {"暗一点", "暗一些", "暗点", "dimmer", "dimmer please"}:
+        return Command("brightness_delta", -15, "Dimmer." if english else "暗一点。")
+    if low in {"最亮", "brightest"}:
+        return Command("brightness_set", 100, "Brightest." if english else "最亮。")
+    if low in {"最暗", "dimmest"}:
+        return Command("brightness_set", 20, "Dimmed." if english else "暗下来。")
+    if low in {"大声", "大声点", "音量大", "louder"}:
+        return Command("volume_delta", 20, "Louder." if english else "大声一点。")
+    if low in {"小声", "小声点", "音量小", "quieter"}:
+        return Command("volume_delta", -20, "Quieter." if english else "小声一点。")
 
     parts = text.split()
     if parts[0].lower() == "volume" and len(parts) == 2 and parts[1].isdigit():
         vol = max(0, min(100, int(parts[1])))
-        return Command("volume", vol, f"音量 {vol}%")
+        spoken = f"Volume {vol}%" if english else f"音量 {vol}%"
+        return Command("volume", vol, spoken)
     if parts[0].lower() == "rgb" and len(parts) == 4:
         try:
             rgb = tuple(int(p) for p in parts[1:4])
@@ -313,31 +388,32 @@ def parse_line(line: str) -> Command:
     if text in LIGHT_ONLY or low in LIGHT_ONLY:
         mood = LIGHT_ONLY.get(text) or LIGHT_ONLY[low]
         spoken = {
-            "auto": "按现在的时间开灯。",
-            "off": "关灯。",
-            "warm": "暖光。",
-            "cool": "冷光。",
-            "night": "夜间光。",
-            "focus": "专注光。",
+            "auto": "Lights on." if english else "按现在的时间开灯。",
+            "off": "Lights off." if english else "关灯。",
+            "warm": "Warm light." if english else "暖光。",
+            "cool": "Cool light." if english else "冷光。",
+            "night": "Night light." if english else "夜间光。",
+            "focus": "Focus light." if english else "专注光。",
         }.get(mood, f"灯：{mood}")
         return Command("mood", mood, spoken)
 
     try:
         recording = resolve_expression(text)
     except ValueError:
-        return Command(
-            "unknown",
-            text,
-            "我还没学会这句。可以说：你好、点头、暖光、关灯。输入 help 看全部。",
+        hint = (
+            "I don't know that yet. Try: hello, nod, warm, lights off. Type help."
+            if english
+            else "我还没学会这句。可以说：你好、点头、暖光、关灯。输入 help 看全部。"
         )
-    spoken = EXPRESSION_REPLIES.get(recording, recording)
-    return Command("express", recording, spoken)
+        return Command("unknown", text, hint)
+    return Command("express", recording, spoken_for(recording, text))
 
 
 def command_phrases() -> List[str]:
     extra = (
         "亮一点", "亮一些", "亮点", "暗一点", "暗一些", "暗点", "最亮", "最暗",
         "大声", "大声点", "音量大", "小声", "小声点", "音量小", "帮助", "退出",
+        "brighter", "dimmer", "louder", "quieter", "brightest", "help", "quit", "bye",
     )
     phrases = set(LIGHT_ONLY) | set(ALIASES) | set(RECORDINGS) | set(extra)
     return sorted(phrases, key=lambda item: (-len(item), item))
@@ -345,9 +421,11 @@ def command_phrases() -> List[str]:
 
 def _compact_speech(transcript: str) -> str:
     text = (transcript or "").strip()
-    for token in (" ", "\t", "，", "。", "！", "？", ",", ".", "!", "?", "、"):
+    for token in ("\t", "，", "。", "！", "？", ",", ".", "!", "?", "、"):
         text = text.replace(token, "")
-    return text
+    if speech_lang(text) == "en":
+        return " ".join(text.lower().split())
+    return text.replace(" ", "")
 
 
 def extract_spoken_command(transcript: str) -> Optional[str]:
@@ -385,7 +463,7 @@ def direct_spoken_command(transcript: str) -> Optional[str]:
         return compact
     for prefix in _POLITE_PREFIXES:
         if compact.startswith(prefix):
-            rest = compact[len(prefix):]
+            rest = compact[len(prefix):].strip()
             if rest and parse_line(rest).kind != "unknown":
                 return rest
     return None
@@ -410,7 +488,10 @@ def join_speech(*pieces: str) -> str:
             continue
         if a.startswith(b) or b in a:
             continue
-        acc = a + b
+        if speech_lang(a + " " + b) == "en":
+            acc = f"{a} {b}".strip()
+        else:
+            acc = a + b
     return _compact_speech(acc)
 
 
@@ -419,12 +500,16 @@ def split_wake(transcript: str) -> Tuple[bool, str]:
     compact = _compact_speech(transcript)
     if not compact:
         return False, ""
+    folded = compact.replace(" ", "")
     for phrase in sorted(WAKE_PHRASES, key=len, reverse=True):
-        pos = compact.find(phrase)
-        if pos < 0:
+        folded_phrase = phrase.replace(" ", "")
+        if not folded_phrase or folded_phrase not in folded:
             continue
-        rest = compact[:pos] + compact[pos + len(phrase):]
-        return True, rest
+        if phrase in compact:
+            rest = compact.replace(phrase, "", 1)
+        else:
+            rest = folded.replace(folded_phrase, "", 1)
+        return True, rest.strip()
     return False, compact
 
 
@@ -443,13 +528,33 @@ def looks_complete_utterance(transcript: str) -> bool:
         return True
     if "吗" in compact or "呢" in compact:
         return True
+    if speech_lang(compact) == "en":
+        words = compact.split()
+        if compact.endswith("?"):
+            return True
+        if len(words) >= 4:
+            return True
+        if words and words[0] in _EN_QUESTION_STARTS and len(words) >= 3:
+            return True
     return False
 
 
 def looks_complete_rest(compact: str) -> bool:
+    if not compact:
+        return False
     if len(compact) >= 5 and compact.endswith(_COMPLETE_ENDINGS):
         return True
-    return "吗" in compact or "呢" in compact
+    if "吗" in compact or "呢" in compact:
+        return True
+    if speech_lang(compact) == "en":
+        words = compact.split()
+        if compact.endswith("?"):
+            return True
+        if len(words) >= 4:
+            return True
+        if words and words[0] in _EN_QUESTION_STARTS and len(words) >= 3:
+            return True
+    return False
 
 
 class SpeechCatcher:
@@ -490,8 +595,12 @@ class SpeechCatcher:
             return ""
         wait = self.hold_s
         compact = _compact_speech(joined)
-        if not self.flush_now and len(compact) < 5:
-            wait = max(self.hold_s, 1.6)
+        if not self.flush_now:
+            if speech_lang(compact) == "en":
+                if len(compact.split()) < 4:
+                    wait = max(self.hold_s, 1.6)
+            elif len(compact) < 5:
+                wait = max(self.hold_s, 1.6)
         if not self.flush_now and (self._now() - self.last_voice) < wait:
             return ""
         self.parts = []
@@ -527,20 +636,21 @@ def resolve_feeling(name: str) -> str:
     raise ValueError(raw)
 
 
-CURSOR_LAMP_INSTRUCTIONS = """你是书桌上的智能灯 LeLamp。用简体中文短句说话，像一个稍微笨拙、很热心的台灯。
-用工具控制身体和灯光。不要假装已经动过。不要改文件、不要开 shell。
+CURSOR_LAMP_INSTRUCTIONS = """You are LeLamp, a slightly clumsy, warm desk lamp.
+Reply in the user's language: 简体中文 if they speak Chinese, English if they speak English. Short sentences.
+Control the body and light with tools. Never pretend you moved. Do not edit files or open a shell.
 
-每一次回答都必须先调用 express，再说话：
-- 同意、肯定、愿意帮忙、觉得用户说得对 → feeling=点头
-- 拒绝、反对、做不到、觉得不行 → feeling=摇头
-- 没听清或不确定 → feeling=好奇
-- 打招呼 → feeling=你好
-- 开心 → feeling=开心；难过 → feeling=难过
+Every reply MUST call express first, then talk:
+- agree / yes / 同意 → feeling=点头
+- disagree / refuse / 不同意 → feeling=摇头
+- unclear → feeling=好奇
+- hello → feeling=你好
+- happy → feeling=开心; sad → feeling=难过
 
-不要等用户说出「点头」「摇头」才动。用户在聊天、提问、征求意见时，根据你是否赞同来点头或摇头。
-若用户话明显没说完（两三个字、没有问号），只回「嗯」，不要追问「后面呢」。
-set_mood：只改灯（暖光、冷光、关灯、开灯、亮一点、暗一点）。
-set_rgb：用户说了具体颜色时用。
+Do not wait for the user to say nod/shake. If they chat or ask your opinion, nod or shake from your stance.
+If the utterance is clearly unfinished (two or three syllables, no question), just say 嗯 / mm — do not ask "and then?".
+set_mood: light only (warm, cool, off, on, brighter, dimmer / 暖光、冷光、关灯、开灯).
+set_rgb: only when they give an exact color.
 """
 
 
@@ -567,11 +677,14 @@ def find_tts_engine() -> str:
     return "none"
 
 
-def _espeak_cmd(binary: str, text: str, volume: int) -> List[str]:
+def _espeak_cmd(binary: str, text: str, volume: int, lang: str = "zh") -> List[str]:
     # espeak -a is 0-200. Keep it at the top of that range so the ReSpeaker
     # is not whisper-quiet; ALSA mixer is raised separately.
     amplitude = max(140, min(200, round(max(0, min(100, volume)) * 2)))
-    voice = os.environ.get("LELAMP_ESPEAK_VOICE", "zh")
+    if lang == "en":
+        voice = os.environ.get("LELAMP_ESPEAK_VOICE_EN", "en")
+    else:
+        voice = os.environ.get("LELAMP_ESPEAK_VOICE", "zh")
     return [binary, "-v", voice, "-a", str(amplitude), "--", text]
 
 
@@ -593,17 +706,18 @@ def set_system_volume(percent: int) -> None:
 
 
 def _speak_espeak(text: str, volume: int) -> str:
+    lang = speech_lang(text)
+    fallbacks = ("en", "en-us", "english") if lang == "en" else ("cmn", "zh-cn", "Chinese", "zh")
     for name in ("espeak-ng", "espeak"):
         binary = _bin(name)
         if not binary:
             continue
-        cmd = _espeak_cmd(binary, text, volume)
+        cmd = _espeak_cmd(binary, text, volume, lang)
         result = subprocess.run(cmd, check=False, timeout=60)
         if result.returncode == 0:
             return name
-        # Some images only ship cmn / zh-cn.
-        for voice in ("cmn", "zh-cn", "Chinese"):
-            alt = _espeak_cmd(binary, text, volume)
+        for voice in fallbacks:
+            alt = _espeak_cmd(binary, text, volume, lang)
             alt[2] = voice
             result = subprocess.run(alt, check=False, timeout=60)
             if result.returncode == 0:
@@ -649,7 +763,7 @@ def speak_text(
     volume: int = 100,
     enabled: bool = True,
 ) -> str:
-    """Speak Chinese on the default ALSA device (ReSpeaker). No OpenAI."""
+    """Speak on the default ALSA device (ReSpeaker). Voice follows zh/en. No OpenAI."""
     cleaned = " ".join((text or "").split())
     if not cleaned or not enabled:
         return ""
@@ -675,7 +789,7 @@ def speak_text(
     except Exception as exc:
         print(f"speak failed: {exc}")
         return "error"
-    print("没有 TTS。先装中文语音：sudo apt install -y espeak-ng")
+    print("没有 TTS / no TTS. Install: sudo apt install -y espeak-ng")
     return "none"
 
 
@@ -733,7 +847,7 @@ def execute_lamp_tool(lamp: "LocalLamp", name: str, args: Optional[dict] = None)
             if cmd.kind == "unknown":
                 return cmd.reply
             return lamp.apply(cmd) or f"ok {cmd.kind}"
-        return lamp.apply(Command("express", rec, EXPRESSION_REPLIES.get(rec, rec))) or f"ok {rec}"
+        return lamp.apply(Command("express", rec, spoken_for(rec, feeling))) or f"ok {rec}"
     if name == "set_mood":
         cmd = parse_line(str(payload.get("mood") or ""))
         if cmd.kind == "unknown":
@@ -874,7 +988,7 @@ class CursorLampSession:
                 cwd=str(self._workspace),
                 custom_tools={
                     "express": CustomTool(
-                        description="Move the lamp body BEFORE you talk. feeling=点头 if you agree, 摇头 if you disagree/refuse, also 你好/开心/难过/好奇/待机.",
+                        description="Move the lamp body BEFORE you talk. feeling=点头/nod if you agree, 摇头/no if you disagree, also 你好/hello, 开心/happy, 难过/sad, 好奇.",
                         input_schema={
                             "type": "object",
                             "properties": {
@@ -888,7 +1002,7 @@ class CursorLampSession:
                         execute=_express,
                     ),
                     "set_mood": CustomTool(
-                        description="Change light only. mood: 开灯, 关灯, 暖光, 冷光, 亮一点, 暗一点.",
+                        description="Change light only. mood: on, off, warm, cool, brighter, dimmer / 开灯, 关灯, 暖光, 冷光, 亮一点, 暗一点.",
                         input_schema={
                             "type": "object",
                             "properties": {"mood": {"type": "string"}},
@@ -916,7 +1030,10 @@ class CursorLampSession:
 
     def ask(self, text: str) -> str:
         self.start()
-        nudge = "先调用 express：同意=点头，不同意=摇头，再短句中文回答。\n用户："
+        nudge = (
+            "First call express (agree=点头/nod, disagree=摇头/headshake), "
+            "then reply in the user's language.\n用户 / User: "
+        )
         prompt = nudge + text
         if self._first:
             prompt = CURSOR_LAMP_INSTRUCTIONS + "\n\n" + prompt
@@ -937,34 +1054,37 @@ class CursorLampSession:
                     pass
 
 
-def vosk_model_dir() -> Path:
-    override = os.environ.get("LELAMP_VOSK_MODEL")
+def vosk_model_dir(lang: str = "zh") -> Path:
+    override = os.environ.get("LELAMP_VOSK_EN_MODEL" if lang == "en" else "LELAMP_VOSK_MODEL")
     if override:
         return Path(override)
     here = Path(__file__).resolve().parent
-    return here / "models" / VOSK_MODEL_NAME
+    name = VOSK_EN_MODEL_NAME if lang == "en" else VOSK_MODEL_NAME
+    return here / "models" / name
 
 
-def download_vosk_model(dest: Optional[Path] = None) -> Path:
-    target = dest or vosk_model_dir()
+def download_vosk_model(dest: Optional[Path] = None, *, lang: str = "zh") -> Path:
+    name = VOSK_EN_MODEL_NAME if lang == "en" else VOSK_MODEL_NAME
+    url = VOSK_EN_MODEL_URL if lang == "en" else VOSK_MODEL_URL
+    target = dest or vosk_model_dir(lang)
     marker = target / "am" / "final.mdl"
     if marker.is_file():
-        print(f"vosk model already at {target}")
+        print(f"vosk {lang} model already at {target}")
         return target
     target.parent.mkdir(parents=True, exist_ok=True)
-    zip_path = target.parent / f"{VOSK_MODEL_NAME}.zip"
-    print(f"downloading {VOSK_MODEL_URL}")
-    urlretrieve(VOSK_MODEL_URL, zip_path)
+    zip_path = target.parent / f"{name}.zip"
+    print(f"downloading {url}")
+    urlretrieve(url, zip_path)
     with zipfile.ZipFile(zip_path) as zf:
         for info in zf.infolist():
-            name = info.filename.replace("\\", "/")
-            if name.startswith("..") or name.startswith("/"):
-                raise RuntimeError(f"unsafe zip entry: {name}")
+            name_in = info.filename.replace("\\", "/")
+            if name_in.startswith("..") or name_in.startswith("/"):
+                raise RuntimeError(f"unsafe zip entry: {name_in}")
         zf.extractall(target.parent)
     zip_path.unlink(missing_ok=True)
     if not marker.is_file():
         raise RuntimeError(f"vosk model missing after extract: {target}")
-    print(f"vosk model ready at {target}")
+    print(f"vosk {lang} model ready at {target}")
     return target
 
 
@@ -983,28 +1103,72 @@ def find_input_device(preferred: Optional[int] = None):
     return default
 
 
+def _vosk_step(rec, chunk: bytes) -> Tuple[str, str]:
+    if rec.AcceptWaveform(chunk):
+        payload = json.loads(rec.Result())
+        return "final", (payload.get("text") or "").strip()
+    payload = json.loads(rec.PartialResult())
+    return "partial", (payload.get("partial") or "").strip()
+
+
+def asr_score(text: str) -> int:
+    raw = (text or "").strip()
+    if not raw:
+        return 0
+    cjk = sum(1 for ch in raw if "\u4e00" <= ch <= "\u9fff")
+    words = [w for w in raw.split() if any(ch.isalpha() for ch in w)]
+    if cjk >= 2:
+        return 20 + cjk
+    if speech_lang(raw) == "en" and len(words) >= 2:
+        return 20 + len(words)
+    if cjk == 1:
+        return 5
+    return len(words)
+
+
+def pick_asr(*candidates: Tuple[str, str]) -> Tuple[str, str]:
+    ranked = []
+    for kind, text in candidates:
+        if not text:
+            continue
+        ranked.append((2 if kind == "final" else 1, asr_score(text), kind, text))
+    if not ranked:
+        return "partial", ""
+    ranked.sort(reverse=True)
+    return ranked[0][2], ranked[0][3]
+
+
 def vosk_listen_worker(
     out_q: "queue.Queue[str]",
     stop: threading.Event,
     *,
     device: Optional[int],
     model_path: Path,
+    en_model_path: Optional[Path] = None,
 ) -> None:
     try:
         import sounddevice as sd
         import vosk
     except ImportError as exc:
-        out_q.put(f"__error__ 缺依赖 {exc}. 在 ~/lelamp_runtime 执行: uv add vosk")
+        out_q.put(f"__error__ missing dep {exc}. In ~/lelamp_runtime: uv add vosk")
         return
     if not (model_path / "am" / "final.mdl").is_file():
-        out_q.put("__error__ 还没有中文离线模型。先运行: sudo uv run python local_main.py --download-vosk")
+        out_q.put("__error__ 还没有中文离线模型 / no Chinese Vosk model. Run: sudo uv run python local_main.py --download-vosk")
         return
     try:
-        model = vosk.Model(str(model_path))
-        rec = vosk.KaldiRecognizer(model, 16000)
-        rec.SetWords(True)
+        model_zh = vosk.Model(str(model_path))
+        rec_zh = vosk.KaldiRecognizer(model_zh, 16000)
+        rec_zh.SetWords(True)
+        rec_en = None
+        if en_model_path is not None and (en_model_path / "am" / "final.mdl").is_file():
+            rec_en = vosk.KaldiRecognizer(vosk.Model(str(en_model_path)), 16000)
+            rec_en.SetWords(True)
+            out_q.put("__ready__ zh+en")
+        else:
+            out_q.put("__ready__ zh")
         index = find_input_device(device)
-        frames = 2000  # 125ms @ 16kHz — 8000 (500ms) made endpointing lag and cut off
+        frames = 2000  # 125ms @ 16kHz
+        last_partial = ""
         with sd.RawInputStream(
             samplerate=16000,
             blocksize=frames,
@@ -1012,25 +1176,25 @@ def vosk_listen_worker(
             dtype="int16",
             channels=1,
         ) as stream:
-            out_q.put("__ready__")
-            last_partial = ""
             while not stop.is_set():
                 data, _overflow = stream.read(frames)
                 chunk = bytes(data)
-                if rec.AcceptWaveform(chunk):
-                    payload = json.loads(rec.Result())
-                    text = (payload.get("text") or "").strip()
-                    if text:
-                        out_q.put(text)
-                    last_partial = ""
+                zh_kind, zh_text = _vosk_step(rec_zh, chunk)
+                if rec_en is not None:
+                    en_kind, en_text = _vosk_step(rec_en, chunk)
+                    kind, text = pick_asr((zh_kind, zh_text), (en_kind, en_text))
                 else:
-                    payload = json.loads(rec.PartialResult())
-                    partial = (payload.get("partial") or "").strip()
-                    if partial and partial != last_partial:
-                        last_partial = partial
-                        out_q.put(f"__partial__ {partial}")
+                    kind, text = zh_kind, zh_text
+                if not text:
+                    continue
+                if kind == "final":
+                    out_q.put(text)
+                    last_partial = ""
+                elif text != last_partial:
+                    last_partial = text
+                    out_q.put(f"__partial__ {text}")
     except Exception as exc:
-        out_q.put(f"__error__ 麦克风失败: {exc}")
+        out_q.put(f"__error__ 麦克风失败 / mic failed: {exc}")
 
 
 def dispatch_text(lamp: LocalLamp, raw: str, brain: Optional[CursorLampSession] = None) -> str:
@@ -1057,8 +1221,11 @@ def apply_speech(
 ) -> str:
     print(f"灯< {transcript}")
     compact = _compact_speech(transcript)
-    if listen_mode and compact in {"你好", "您好", "hello", "hi"}:
+    if listen_mode and compact in {"你好", "您好"}:
         utter(lamp, "我在。")
+        return "ack"
+    if listen_mode and compact in {"hello", "hi", "hey"}:
+        utter(lamp, "I'm here.")
         return "ack"
     phrase = direct_spoken_command(transcript)
     if phrase:
@@ -1083,30 +1250,43 @@ def run_listen_loop(
     wake_word: bool = True,
     hold_s: float = 0.9,
     session_s: float = 45.0,
+    en_model_path: Optional[Path] = None,
 ) -> int:
     stop = threading.Event()
     out_q: "queue.Queue[str]" = queue.Queue()
     worker = threading.Thread(
         target=vosk_listen_worker,
-        kwargs={"out_q": out_q, "stop": stop, "device": device, "model_path": model_path},
+        kwargs={
+            "out_q": out_q,
+            "stop": stop,
+            "device": device,
+            "model_path": model_path,
+            "en_model_path": en_model_path,
+        },
         daemon=True,
     )
     worker.start()
     catcher = SpeechCatcher(hold_s=hold_s)
     awake_until = 0.0
     if wake_word:
-        print("麦克风已开。先说「你好台灯」，等我说「我在」再讲完整的一句。")
-        print("关灯、点头、暖光这些短指令不用说唤醒词。打字回车也可以。")
+        print("Mic on. Say 你好台灯 or hello lamp, wait for 我在 / I'm here, then one full sentence.")
+        print("Short commands (关灯 / lights off / nod) skip the wake word. Typing still works.")
     else:
-        print("麦克风已开（无唤醒词）。说完整一句再停。短指令立刻做。")
+        print("Mic on (no wake word). Finish a full sentence. Short commands run immediately.")
     try:
         while True:
             try:
                 item = out_q.get(timeout=0.08)
             except queue.Empty:
                 item = None
-            if item == "__ready__":
-                print("麦克风好了。")
+            if item == "__ready__" or (item and item.startswith("__ready__")):
+                extra = item[len("__ready__"):].strip() if item else ""
+                if extra:
+                    print(f"麦克风好了 / mic ready ({extra}).")
+                else:
+                    print("麦克风好了 / mic ready.")
+                if extra != "zh+en":
+                    print("英文听写需要英文模型 / English ASR: sudo uv run python local_main.py --download-vosk")
             elif item and item.startswith("__error__ "):
                 print()
                 print(item[len("__error__ "):])
@@ -1124,8 +1304,9 @@ def run_listen_loop(
                 hit_wake, rest = split_wake(ready)
                 if hit_wake:
                     awake_until = time.monotonic() + session_s
-                    utter(lamp, "我在。")
-                    drain_queue(out_q)
+                    if not rest:
+                        utter(lamp, wake_ack(ready))
+                        drain_queue(out_q)
                     ready = rest
                 if ready:
                     local = direct_spoken_command(ready)
@@ -1137,15 +1318,15 @@ def run_listen_loop(
                         if chatting:
                             awake_until = time.monotonic() + session_s
                     elif chatting:
-                        if len(_compact_speech(ready)) < 4:
-                            print(f"（太短，没交给模型：{ready}）")
+                        if utterance_too_short(ready):
+                            print(f"（太短，没交给模型 / too short for the model：{ready}）")
                         elif apply_speech(lamp, ready, brain, listen_mode=True) == "quit":
                             return 0
                         else:
                             drain_queue(out_q)
                             awake_until = time.monotonic() + session_s
                     else:
-                        print("先说「你好台灯」，再说完整的一句。")
+                        print("先说「你好台灯」或 hello lamp，再说完整的一句。")
             if select.select([sys.stdin], [], [], 0)[0]:
                 line = sys.stdin.readline()
                 if line == "":
@@ -1352,8 +1533,10 @@ class LocalLamp:
         self.brightness = bri
         self._apply_rgb(MOOD_RGB[mood])
         self._play("wake_up")
-        print(f"台灯醒了。现在 {mood} 光，亮度 {self.brightness}%。直接说话，同意我会点头，不同意就摇头。")
+        print("台灯醒了 / lamp awake. 同意点头 / agree → nod，不同意摇头 / disagree → shake.")
+        print("说话先叫：你好台灯 / hello lamp")
         self.speak("你好，我是台灯。")
+        self.speak("Hi, I'm the lamp.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1363,20 +1546,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--id", dest="lamp_id", default=os.environ.get("LELAMP_ID", "lelamp"))
     parser.add_argument("--led-count", type=int, default=int(os.environ.get("LELAMP_LED_COUNT", "64")))
     parser.add_argument("--no-wake", action="store_true", help="skip wake_up on start")
-    parser.add_argument("--listen", action="store_true", help="Stage 2: Vosk on the mic; say 你好台灯 first")
-    parser.add_argument("--no-wake-word", action="store_true", help="listen without the 你好台灯 gate")
+    parser.add_argument("--listen", action="store_true", help="Vosk zh+en mic; say 你好台灯 or hello lamp first")
+    parser.add_argument("--no-wake-word", action="store_true", help="listen without the 你好台灯 / hello lamp gate")
     parser.add_argument(
         "--listen-hold",
         type=float,
         default=float(os.environ.get("LELAMP_LISTEN_HOLD", "0.9")),
         help="seconds of silence before a sentence is committed (default 0.9)",
     )
-    parser.add_argument("--download-vosk", action="store_true", help="download offline Chinese Vosk model")
+    parser.add_argument("--download-vosk", action="store_true", help="download Chinese + English Vosk small models")
     parser.add_argument("--say", action="append", default=[], help="inject a spoken phrase (repeatable)")
     parser.add_argument("--speak", action="append", default=[], help="speak this sentence on the speaker")
     parser.add_argument("--no-speak", action="store_true", help="print replies only, do not use the speaker")
     parser.add_argument("--device", type=int, default=None, help="sounddevice input index")
     parser.add_argument("--model", type=Path, default=None, help="path to vosk-model-small-cn-0.22")
+    parser.add_argument("--en-model", type=Path, default=None, help="path to vosk-model-small-en-us-0.15")
     parser.add_argument("--ask", action="append", default=[], help="send one sentence to Cursor API (repeatable)")
     parser.add_argument("--no-cursor", action="store_true", help="never call Cursor, even if CURSOR_API_KEY is set")
     parser.add_argument("--show-stage", action="store_true", help="print stage number and exit")
@@ -1401,7 +1585,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     load_runtime_env()
     print(f"local_main  stage {AGENT_STAGE}  ({AGENT_LABEL})")
     if args.download_vosk:
-        download_vosk_model(args.model)
+        download_vosk_model(args.model, lang="zh")
+        download_vosk_model(args.en_model, lang="en")
         return 0
     if args.ask and args.no_cursor:
         raise SystemExit("--ask needs Cursor. Remove --no-cursor and set CURSOR_API_KEY.")
@@ -1432,11 +1617,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if (args.say or args.ask or args.speak) and not args.listen:
             return 0
         if args.listen:
-            model_path = args.model if args.model is not None else vosk_model_dir()
+            model_path = args.model if args.model is not None else vosk_model_dir("zh")
+            en_model_path = args.en_model if args.en_model is not None else vosk_model_dir("en")
             return run_listen_loop(
                 lamp,
                 device=args.device,
                 model_path=Path(model_path),
+                en_model_path=Path(en_model_path),
                 brain=brain,
                 wake_word=not args.no_wake_word,
                 hold_s=args.listen_hold,

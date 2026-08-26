@@ -48,9 +48,9 @@ Keep the runnable name `local_main.py`. After a stage works, run `sudo uv run py
 
 Stage 1 (keyboard, no cloud): `sudo uv run python local_main.py`. Type `你好` / `点头` / `暖光` / `关灯`. `--sim` prints actions without servos.
 
-Stage 2 (ReSpeaker): `uv add vosk`, then `--download-vosk` and `--listen`. Say **你好台灯**, wait for 我在, then one full sentence. Short commands (`关灯`, `点头`) skip the wake word. `--no-wake-word` opens the mic. Mapping without a mic: `--say 请关灯`.
+Stage 2 (ReSpeaker, zh+en): `uv add vosk`, then `--download-vosk` (Chinese + English small models) and `--listen`. Say **你好台灯** or **hello lamp**, wait for 我在 / I'm here, then one full sentence. Short commands (`关灯`, `lights off`, `点头`, `nod`) skip the wake word. `--no-wake-word` opens the mic. Mapping without a mic: `--say 请关灯` or `--say "lights off"`.
 
-Stage 3 (Cursor API + speaker): put `CURSOR_API_KEY=crsr_...` in `~/lelamp_runtime/.env` (key from https://cursor.com/dashboard/api). `uv add cursor-sdk`, `sudo apt install -y espeak-ng`, then `sudo uv run python local_main.py --sim --ask "把灯调成暖光并点点头"`. Short keywords run locally. Full sentences go to Cursor (agree → nod, disagree → headshake). Replies play on the ReSpeaker. `--speak "你好"` tests the speaker. `--no-speak` prints only. This is cursor-sdk, not a DeepSeek/OpenAI chat URL.
+Stage 3 (Cursor API + speaker): put `CURSOR_API_KEY=crsr_...` in `~/lelamp_runtime/.env` (key from https://cursor.com/dashboard/api). `uv add cursor-sdk`, `sudo apt install -y espeak-ng`, then `sudo uv run python local_main.py --sim --ask "把灯调成暖光并点点头"` or `--ask "Do you agree warm light is nicer?"`. Short keywords run locally. Full sentences go to Cursor (agree → nod, disagree → headshake). Replies play on the ReSpeaker in the user's language (espeak `-v zh` / `-v en`). `--speak "你好"` / `--speak "hello"` tests the speaker. `--no-speak` prints only. This is cursor-sdk, not a DeepSeek/OpenAI chat URL.
 
 The LiveKit + OpenAI Realtime path is optional later: copy `plugins/lelamp/runtime_main.py` over `~/lelamp_runtime/main.py`, put `OPENAI_API_KEY` in `.env`, then `sudo uv run main.py console`.
 

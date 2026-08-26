@@ -15,9 +15,13 @@ from plugins.lelamp.local_main import (
     join_speech,
     looks_complete_utterance,
     parse_line,
+    pick_asr,
     resolve_feeling,
     speak_text,
+    speech_lang,
     split_wake,
+    utterance_too_short,
+    wake_ack,
 )
 
 
@@ -185,12 +189,18 @@ def test_extract_spoken_command_from_padded_asr():
     assert extract_spoken_command("你 好 呀") == "你好"
     assert extract_spoken_command("今天天气怎么样") is None
     assert extract_spoken_command("不要关灯") == "不要"
+    assert extract_spoken_command("please lights off") == "lights off"
+    assert extract_spoken_command("lights on") == "lights on"
 
 
 def test_direct_spoken_command_keeps_full_sentences_for_the_model():
     assert direct_spoken_command("关灯") == "关灯"
     assert direct_spoken_command("请点头") == "点头"
     assert direct_spoken_command("帮我暖光") == "暖光"
+    assert direct_spoken_command("lights off") == "lights off"
+    assert direct_spoken_command("please nod") == "nod"
+    assert direct_spoken_command("warm light") == "warm light"
+    assert direct_spoken_command("Do you agree warm light is nicer") is None
     assert direct_spoken_command("这样用暖光看书你同意吗") is None
     assert direct_spoken_command("今天天气怎么样") is None
 
@@ -260,16 +270,24 @@ def test_join_speech_glues_vosk_fragments():
     assert join_speech("今天", "几号 了") == "今天几号了"
     assert join_speech("把你", "把你差了吧") == "把你差了吧"
     assert join_speech("今天几号了") == "今天几号了"
+    assert join_speech("what day", "is it") == "what day is it"
+    assert join_speech("hello lamp") == "hello lamp"
 
 
 def test_split_wake_and_complete_utterance():
     assert split_wake("你好台灯") == (True, "")
     assert split_wake("你好台灯今天几号了") == (True, "今天几号了")
+    assert split_wake("hello lamp") == (True, "")
+    assert split_wake("hello lamp what day is it") == (True, "what day is it")
+    assert split_wake("hey lamp lights off") == (True, "lights off")
     assert split_wake("关灯") == (False, "关灯")
+    assert split_wake("lights off") == (False, "lights off")
     assert looks_complete_utterance("关灯") is True
     assert looks_complete_utterance("今天") is False
     assert looks_complete_utterance("今天几号了") is True
     assert looks_complete_utterance("暖光看书更舒服你同意吗") is True
+    assert looks_complete_utterance("what day is it") is True
+    assert looks_complete_utterance("today") is False
 
 
 def test_speech_catcher_waits_then_merges():
@@ -318,6 +336,9 @@ def test_listen_hello_does_not_replay_wake_up():
 
     apply_speech(lamp, "你好", Brain(), listen_mode=True)
     assert lamp.last_expression != "wake_up"
+    apply_speech(lamp, "hello", Brain(), listen_mode=True)
+    assert lamp.last_expression != "wake_up"
+    assert lamp.last_spoken == "I'm here."
 
 
 def test_show_stage_prints_current_stage(capsys):
@@ -455,6 +476,29 @@ def test_speak_text_espeak_ng(monkeypatch):
     assert "点头" in calls[0]
 
 
+def test_espeak_english_voice(monkeypatch):
+    from plugins.lelamp import local_main
+
+    calls = []
+
+    def fake_which(name):
+        if name == "espeak-ng":
+            return "/usr/bin/espeak-ng"
+        return None
+
+    def fake_run(cmd, check=False, timeout=None):
+        calls.append(list(cmd))
+        return type("R", (), {"returncode": 0})()
+
+    monkeypatch.delenv("LELAMP_TTS", raising=False)
+    monkeypatch.delenv("LELAMP_PIPER_MODEL", raising=False)
+    monkeypatch.delenv("LELAMP_ESPEAK_VOICE_EN", raising=False)
+    monkeypatch.setattr(local_main.shutil, "which", fake_which)
+    monkeypatch.setattr(local_main.subprocess, "run", fake_run)
+    assert speak_text("Hello, I am the lamp.", sim=False, volume=100) == "espeak-ng"
+    assert calls[0][calls[0].index("-v") + 1] == "en"
+
+
 def test_main_sim_speak_without_cursor(capsys):
     from plugins.lelamp import local_main
 
@@ -462,3 +506,71 @@ def test_main_sim_speak_without_cursor(capsys):
     out = capsys.readouterr().out
     assert "stage 3" in out
     assert "[sim] speak 你好，我是台灯" in out
+
+
+def test_english_keywords_parse_and_reply():
+    assert parse_line("lights off").kind == "mood"
+    assert parse_line("lights off").payload == "off"
+    assert parse_line("lights off").reply == "Lights off."
+    assert parse_line("warm light").payload == "warm"
+    assert parse_line("nod").kind == "express"
+    assert parse_line("nod").payload == "nod"
+    assert parse_line("shake").payload == "headshake"
+    assert parse_line("brighter").kind == "brightness_delta"
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    assert "Okay." in lamp.apply(parse_line("nod"))
+    lamp.apply(parse_line("lights off"))
+    assert lamp.last_rgb == (0, 0, 0)
+
+
+def test_bilingual_helpers():
+    assert speech_lang("今天几号了") == "zh"
+    assert speech_lang("what day is it") == "en"
+    assert wake_ack("你好台灯") == "我在。"
+    assert wake_ack("hello lamp") == "I'm here."
+    assert utterance_too_short("今天") is True
+    assert utterance_too_short("hi") is True
+    assert utterance_too_short("what day is it") is False
+    assert pick_asr(("final", "今"), ("final", "what day is it"))[1] == "what day is it"
+    assert pick_asr(("final", "今天几号了"), ("final", "ah"))[1] == "今天几号了"
+
+
+def test_speech_catcher_keeps_english_spaces():
+    class Clock:
+        def __init__(self):
+            self.t = 0.0
+
+        def __call__(self):
+            return self.t
+
+    clock = Clock()
+    catcher = SpeechCatcher(hold_s=0.9, now=clock)
+    catcher.note_final("what day")
+    assert catcher.take_ready() == ""
+    clock.t = 0.5
+    catcher.note_final("is it")
+    assert catcher.take_ready() == "what day is it"
+
+
+def test_download_vosk_flag_is_bilingual():
+    from plugins.lelamp.local_main import build_parser
+
+    help_text = build_parser().format_help()
+    assert "English" in help_text or "zh+en" in help_text
+    args = build_parser().parse_args(["--download-vosk"])
+    assert args.download_vosk is True
+
+
+def test_main_sim_speak_english(capsys):
+    from plugins.lelamp import local_main
+
+    assert local_main.main(["--sim", "--no-wake", "--speak", "hello I'm the lamp"]) == 0
+    out = capsys.readouterr().out
+    assert "[sim] speak hello I'm the lamp" in out
+    assert "vosk(zh+en)" in out
