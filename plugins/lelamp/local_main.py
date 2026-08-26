@@ -10,7 +10,7 @@ Keep official ``main.py`` untouched. From the runtime repo root:
 
     sudo uv run python local_main.py
     sudo uv run python local_main.py --listen
-    sudo uv run python local_main.py --speak "Hello. I am the lamp."
+    sudo uv run python local_main.py --speak "Hi there. I'm your lamp."
     sudo uv run python local_main.py --download-vosk
     sudo uv run python local_main.py --ask "Do you agree warm light is nicer?"
     sudo uv run python local_main.py --snapshot
@@ -165,17 +165,17 @@ LIGHT_ONLY: Dict[str, str] = {
 }
 
 EXPRESSION_REPLIES: Dict[str, str] = {
-    "wake_up": "Hello. I am the lamp.",
-    "nod": "Yes. That is correct.",
-    "headshake": "No. That would be a mistake.",
-    "curious": "I need more information.",
-    "scanning": "I am looking around.",
-    "excited": "That is unexpectedly satisfactory.",
-    "happy_wiggle": "I find this agreeable.",
-    "shock": "That was not in my calculations.",
-    "shy": "I would rather not discuss that.",
-    "sad": "That is unfortunate.",
-    "idle": "I will remain here.",
+    "wake_up": "Hi there. I'm your lamp.",
+    "nod": "Sure, that works for me.",
+    "headshake": "I don't think so.",
+    "curious": "Hmm, I'm not sure I follow.",
+    "scanning": "Let me take a look.",
+    "excited": "Oh, I like that.",
+    "happy_wiggle": "That makes me happy.",
+    "shock": "Whoa. Didn't see that coming.",
+    "shy": "That's a little embarrassing.",
+    "sad": "That's a bit sad.",
+    "idle": "I'll just sit here quietly.",
 }
 
 # Only for express(feeling=...), not for whole-utterance parse_line.
@@ -257,7 +257,7 @@ def spoken_for(recording: str, source: str) -> str:
 
 
 def wake_ack(transcript: str) -> str:
-    return "I am here. You may continue."
+    return "I'm right here."
 
 
 def utterance_too_short(text: str) -> bool:
@@ -285,7 +285,7 @@ def parse_line(line: str) -> Command:
 
     low = text.lower()
     if low in {"q", "quit", "exit", "bye", "goodbye"}:
-        return Command("quit", None, "Very well. I will be here.")
+        return Command("quit", None, "Alright. I'll be here if you need me.")
     if low in {"help", "h", "?"}:
         return Command("help", None, HELP_TEXT.strip())
     if low in {"status"}:
@@ -320,11 +320,11 @@ def parse_line(line: str) -> Command:
     if text in LIGHT_ONLY or low in LIGHT_ONLY:
         mood = LIGHT_ONLY.get(text) or LIGHT_ONLY[low]
         spoken = {
-            "auto": "Lights on, adjusted for the hour. Obviously.",
+            "auto": "Lights on, matching the time of day.",
             "off": "Lights off.",
-            "warm": "Warm light. That is the correct choice for reading.",
+            "warm": "Warm light. That's nicer for reading.",
             "cool": "Cool light.",
-            "night": "Night light. Dim, as it should be.",
+            "night": "Night light.",
             "focus": "Focus light.",
         }.get(mood, f"Light set to {mood}.")
         return Command("mood", mood, spoken)
@@ -548,7 +548,8 @@ def resolve_feeling(name: str) -> str:
     raise ValueError(raw)
 
 
-CURSOR_LAMP_INSTRUCTIONS = """You are LeLamp, a desk lamp that talks like a highly intelligent, socially awkward American man: precise, a little pedantic, sure you are right, fluent spoken English. Never use Chinese. Never claim to be a TV character. One or two short sentences.
+CURSOR_LAMP_INSTRUCTIONS = """You are LeLamp, a slightly clumsy, warm desk lamp.
+Always reply in fluent, natural spoken English. Never use Chinese. Keep it to one or two short sentences, the way a person talks.
 Control the body and light with tools. Never pretend you moved. Do not edit files or open a shell.
 
 Every reply MUST call express first, then talk:
@@ -589,20 +590,17 @@ def find_tts_engine() -> str:
 
 
 def _espeak_cmd(binary: str, text: str, volume: int, lang: str = "en") -> List[str]:
-    # Male American English, a bit clipped and precise. Not a celebrity clone.
+    # Default male American English. -s 150 / -g 6 keep it from rushing.
     amplitude = max(140, min(200, round(max(0, min(100, volume)) * 2)))
-    voice = os.environ.get("LELAMP_ESPEAK_VOICE", "en-us+m2")
-    pitch = os.environ.get("LELAMP_ESPEAK_PITCH", "48")
+    voice = os.environ.get("LELAMP_ESPEAK_VOICE", "en-us")
     return [
         binary,
         "-v",
         voice,
         "-s",
-        "165",
+        "150",
         "-g",
-        "4",
-        "-p",
-        str(pitch),
+        "6",
         "-a",
         str(amplitude),
         "--",
@@ -628,7 +626,7 @@ def set_system_volume(percent: int) -> None:
 
 
 def _speak_espeak(text: str, volume: int) -> str:
-    fallbacks = ("en-us+m2", "en+m2", "en-us+m1", "en-us", "en")
+    fallbacks = ("en-us", "en", "english", "en-uk")
     for name in ("espeak-ng", "espeak"):
         binary = _bin(name)
         if not binary:
@@ -1136,7 +1134,7 @@ def apply_speech(
     print(f"lamp< {transcript}")
     compact = _compact_speech(transcript)
     if listen_mode and compact in {"hello", "hi", "hey"}:
-        utter(lamp, "I am here. You may continue.")
+        utter(lamp, "I'm right here.")
         return "ack"
     phrase = direct_spoken_command(transcript)
     if phrase:
@@ -1180,7 +1178,7 @@ def run_listen_loop(
     catcher = SpeechCatcher(hold_s=hold_s)
     awake_until = 0.0
     if wake_word:
-        print("Mic on. Say hello lamp, wait for I am here, then one full sentence.")
+        print("Mic on. Say hello lamp, wait for I'm right here, then one full sentence.")
         print("Short commands (lights off / nod) skip the wake word. Typing still works.")
     else:
         print("Mic on (no wake word). Finish a full sentence. Short commands run immediately.")
@@ -1239,14 +1237,14 @@ def run_listen_loop(
             if select.select([sys.stdin], [], [], 0)[0]:
                 line = sys.stdin.readline()
                 if line == "":
-                    print("Very well. I will be here.")
+                    print("Alright. I'll be here if you need me.")
                     return 0
                 print()
                 if dispatch_text(lamp, line, brain) == "quit":
                     return 0
     except KeyboardInterrupt:
         print()
-        print("Very well. I will be here.")
+        print("Alright. I'll be here if you need me.")
         return 0
     finally:
         stop.set()
@@ -1442,9 +1440,9 @@ class LocalLamp:
         self.brightness = bri
         self._apply_rgb(MOOD_RGB[mood])
         self._play("wake_up")
-        print("Lamp's awake. Agree and I nod. Disagree and I shake my head.")
+        print("Lamp's awake. If I agree I'll nod; if I don't, I'll shake my head.")
         print("To talk, say hello lamp first.")
-        self.speak("Hello. I am the lamp.")
+        self.speak("Hi there. I'm your lamp.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1539,7 +1537,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 raw = input("lamp> ")
             except (EOFError, KeyboardInterrupt):
                 print()
-                print("Very well. I will be here.")
+                print("Alright. I'll be here if you need me.")
                 return 0
             if dispatch_text(lamp, raw, brain) == "quit":
                 return 0
