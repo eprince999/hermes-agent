@@ -36,6 +36,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -813,9 +814,43 @@ class LocalLamp:
         )
         self.motors.start()
         self.rgb.start()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and getattr(self.motors, "robot", None) is None:
+            time.sleep(0.05)
         print(f"motors on {self.port}  rgb leds={self.led_count}")
 
+    def _service_busy(self, svc) -> bool:
+        if svc is None:
+            return False
+        pending = getattr(svc, "has_pending_event", None)
+        if callable(pending):
+            try:
+                if pending():
+                    return True
+            except TypeError:
+                pass
+        elif pending:
+            return True
+        return getattr(svc, "_current_event", None) is not None
+
+    def _wait_hw(self, timeout: float = 45.0) -> None:
+        """Wait until motor/RGB workers finish. Official play is async and
+        single-slot; stop() sets robot=None before joining the worker."""
+        if self.sim:
+            return
+        deadline = time.monotonic() + timeout
+        for svc in (self.motors, self.rgb):
+            if svc is None:
+                continue
+            wait = getattr(svc, "wait_until_idle", None)
+            if callable(wait):
+                remaining = max(0.05, deadline - time.monotonic())
+                wait(remaining)
+            while self._service_busy(svc) and time.monotonic() < deadline:
+                time.sleep(0.02)
+
     def stop(self) -> None:
+        self._wait_hw()
         for svc in (self.motors, self.rgb):
             if svc is None:
                 continue
@@ -833,7 +868,21 @@ class LocalLamp:
         if self.sim or self.motors is None:
             print(f"[sim] play {recording}")
             return
+        # Finish any in-flight recording first. MotorsService has one slot:
+        # a second dispatch overwrites _current_event, and the worker's
+        # finally clause then drops the new play.
+        self._wait_hw()
+        robot = getattr(self.motors, "robot", None)
+        play_fn = getattr(self.motors, "_handle_play", None)
+        if robot is not None and callable(play_fn):
+            # Official stop() does robot.disconnect(); robot=None; then
+            # joins the worker. Playing on this thread means --ask cannot
+            # return (and stop) while send_action is still looping.
+            play_fn(recording)
+            return
         self.motors.dispatch("play", recording)
+        time.sleep(0.05)
+        self._wait_hw()
 
     def _apply_rgb(self, rgb: Tuple[int, int, int]) -> None:
         self.base_rgb = rgb
@@ -843,6 +892,7 @@ class LocalLamp:
             print(f"[sim] rgb {scaled} brightness={self.brightness}")
             return
         self.rgb.dispatch("solid", scaled)
+        self._wait_hw(timeout=5.0)
 
     def apply(self, cmd: Command) -> str:
         if cmd.kind == "noop":

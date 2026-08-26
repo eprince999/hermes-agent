@@ -79,6 +79,87 @@ def test_sim_express_then_off_updates_state():
     assert lamp.brightness == 85
 
 
+class _OfficialStopMotors:
+    """Mirrors MotorsService.stop(): null robot before the worker can finish."""
+
+    def __init__(self):
+        self.robot = object()
+        self.play_saw_robot = None
+        self.dispatched = []
+        self.waits = 0
+        self.stopped = False
+        self._current_event = None
+
+    def _handle_play(self, recording_name):
+        self.play_saw_robot = self.robot
+        assert self.robot is not None
+
+    def dispatch(self, event_type, payload, priority=None):
+        self.dispatched.append((event_type, payload))
+
+    def wait_until_idle(self, timeout=None):
+        self.waits += 1
+        return True
+
+    def stop(self, timeout=5.0):
+        self.robot = None
+        self.stopped = True
+
+
+def test_hardware_play_sync_before_stop_nulls_robot():
+    lamp = LocalLamp(
+        sim=False,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    lamp.motors = _OfficialStopMotors()
+    lamp.rgb = _OfficialStopMotors()
+    lamp._play("nod")
+    assert lamp.motors.play_saw_robot is not None
+    assert lamp.motors.dispatched == []
+    lamp.stop()
+    assert lamp.motors.robot is None
+    assert lamp.motors.stopped is True
+
+
+def test_hardware_play_dispatch_fallback_waits():
+    class DispatchOnly:
+        def __init__(self):
+            self.robot = None
+            self.plays = []
+            self.waits = 0
+            self.stopped = False
+            self._current_event = None
+
+        def dispatch(self, event_type, payload, priority=None):
+            self.plays.append((event_type, payload))
+            self._current_event = None
+
+        def wait_until_idle(self, timeout=None):
+            self.waits += 1
+            return True
+
+        def stop(self, timeout=5.0):
+            self.stopped = True
+
+    lamp = LocalLamp(
+        sim=False,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    lamp.motors = DispatchOnly()
+    lamp.rgb = DispatchOnly()
+    lamp._play("nod")
+    assert lamp.motors.plays == [("play", "nod")]
+    assert lamp.motors.waits >= 1
+    lamp.stop()
+    assert lamp.motors.stopped is True
+
+
 def test_main_sim_scripted_session(monkeypatch, capsys):
     from plugins.lelamp import local_main
 
