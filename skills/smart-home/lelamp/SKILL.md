@@ -52,6 +52,8 @@ Stage 2 (ReSpeaker keywords): `uv add vosk`, then `--download-vosk` and `--liste
 
 Stage 3 (Cursor API brain): put `CURSOR_API_KEY=crsr_...` in `~/lelamp_runtime/.env` (key from https://cursor.com/dashboard/api). `uv add cursor-sdk`, then `sudo uv run python local_main.py --sim --ask "把灯调成暖光并点点头"`. Keywords still run locally; other sentences go to Cursor. This is cursor-sdk (local custom tools), not a DeepSeek/OpenAI chat URL.
 
+Stage 4 (speaker): `sudo apt install -y espeak-ng`, then `sudo uv run python local_main.py --no-wake --speak "你好，我是台灯"`. `--ask` replies are spoken on the ReSpeaker. `--no-speak` prints only. Optional Piper: set `LELAMP_PIPER_MODEL` to a zh `.onnx`. No OpenAI TTS.
+
 The LiveKit + OpenAI Realtime path is optional later: copy `plugins/lelamp/runtime_main.py` over `~/lelamp_runtime/main.py`, put `OPENAI_API_KEY` in `.env`, then `sudo uv run main.py console`.
 
 On this machine, load this skill and drive a sim/SSH body with `terminal` plus:

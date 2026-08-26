@@ -10,6 +10,7 @@ from plugins.lelamp.local_main import (
     execute_lamp_tool,
     extract_spoken_command,
     parse_line,
+    speak_text,
 )
 
 
@@ -191,10 +192,10 @@ def test_show_stage_prints_current_stage(capsys):
 def test_snapshot_saves_stage2_copy(tmp_path, capsys):
     from plugins.lelamp import local_main
 
-    dest = local_main.snapshot_current("stage3", dest_dir=tmp_path)
-    assert dest.name == "stage3.py"
+    dest = local_main.snapshot_current("stage4", dest_dir=tmp_path)
+    assert dest.name == "stage4.py"
     assert dest.is_file()
-    assert "AGENT_STAGE = 3" in dest.read_text(encoding="utf-8")
+    assert "AGENT_STAGE = 4" in dest.read_text(encoding="utf-8")
     assert "saved snapshot" in capsys.readouterr().out
     args = local_main.build_parser().parse_args(["--snapshot"])
     assert args.snapshot == ""
@@ -257,3 +258,58 @@ def test_cursor_api_key_missing_is_explicit(monkeypatch):
         raise AssertionError("expected SystemExit")
     except SystemExit as exc:
         assert "CURSOR_API_KEY" in str(exc)
+
+
+def test_volume_keywords_and_status():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    assert parse_line("大声").kind == "volume_delta"
+    lamp.apply(parse_line("大声"))
+    assert lamp.volume == 100
+    lamp.apply(parse_line("volume 40"))
+    assert lamp.volume == 40
+    assert "volume=40" in lamp.apply(parse_line("status"))
+
+
+def test_speak_text_sim_prints(capsys):
+    assert speak_text("你好，我是台灯", sim=True) == "sim"
+    assert "[sim] speak 你好，我是台灯" in capsys.readouterr().out
+    assert speak_text("ignore me", sim=True, enabled=False) == ""
+
+
+def test_speak_text_espeak_ng(monkeypatch):
+    from plugins.lelamp import local_main
+
+    calls = []
+
+    def fake_which(name):
+        if name == "espeak-ng":
+            return "/usr/bin/espeak-ng"
+        return None
+
+    def fake_run(cmd, check=False, timeout=None):
+        calls.append(list(cmd))
+        return type("R", (), {"returncode": 0})()
+
+    monkeypatch.delenv("LELAMP_TTS", raising=False)
+    monkeypatch.delenv("LELAMP_PIPER_MODEL", raising=False)
+    monkeypatch.setattr(local_main.shutil, "which", fake_which)
+    monkeypatch.setattr(local_main.subprocess, "run", fake_run)
+    assert speak_text("点头", sim=False, volume=80) == "espeak-ng"
+    assert calls[0][0] == "/usr/bin/espeak-ng"
+    assert "-v" in calls[0]
+    assert "点头" in calls[0]
+
+
+def test_main_sim_speak_without_cursor(capsys):
+    from plugins.lelamp import local_main
+
+    assert local_main.main(["--sim", "--no-wake", "--speak", "你好，我是台灯"]) == 0
+    out = capsys.readouterr().out
+    assert "stage 4" in out
+    assert "[sim] speak 你好，我是台灯" in out

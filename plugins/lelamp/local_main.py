@@ -1,27 +1,28 @@
-"""LeLamp local agent — Stages 1–3, no OpenAI, no LiveKit.
+"""LeLamp local agent — Stages 1–4, no OpenAI, no LiveKit.
 
 Always copy onto the Pi as ``~/lelamp_runtime/local_main.py``.
 Do not rename the runnable file per stage. Snapshot instead::
 
     mkdir -p ~/lelamp_runtime/lamp_snapshots
-    cp local_main.py lamp_snapshots/stage2.py
+    cp local_main.py lamp_snapshots/stage3.py
 
 Keep official ``main.py`` untouched. From the runtime repo root:
 
     sudo uv run python local_main.py
     sudo uv run python local_main.py --listen
+    sudo uv run python local_main.py --speak "你好，我是台灯"
     sudo uv run python local_main.py --ask "把灯调成暖光并点点头"
     sudo uv run python local_main.py --snapshot
 
 Stage 3 uses Cursor's official API (cursor-sdk + CURSOR_API_KEY from
-https://cursor.com/dashboard/api). That API is an agent SDK, not a
-DeepSeek/OpenAI chat-completions URL. Local custom tools move the lamp.
+https://cursor.com/dashboard/api). Stage 4 reads replies on the ReSpeaker
+with espeak-ng (or piper if LELAMP_PIPER_MODEL is set). No OpenAI TTS.
 
 Roadmap:
   1. keyboard + motors + RGB
   2. on-device speech keywords (Vosk)
-  3. Cursor API as the brain (this file)
-  4. spoken replies on the speaker
+  3. Cursor API as the brain
+  4. spoken replies on the speaker (this file)
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ import os
 import queue
 import select
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -45,8 +47,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from urllib.request import urlretrieve
 
 # Bump when a stage lands. Printed at startup so a snapshot is identifiable.
-AGENT_STAGE = 3
-AGENT_LABEL = "keyboard + vosk + cursor-sdk"
+AGENT_STAGE = 4
+AGENT_LABEL = "keyboard + vosk + cursor-sdk + tts"
 
 
 def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = None) -> Path:
@@ -182,9 +184,10 @@ LIGHT_ONLY: Dict[str, str] = {
     "专注": "focus",
 }
 
-HELP_TEXT = """本地台灯 Stage 3（Cursor API，无 OpenAI）
+HELP_TEXT = """本地台灯 Stage 4（Cursor API + 喇叭，无 OpenAI）
 动作：你好 / 点头 / 摇头 / 好奇 / 张望 / 开心 / 兴奋 / 惊讶 / 害羞 / 难过 / 待机
 灯光：开灯 / 关灯 / 暖光 / 冷光 / 自动 / 亮一点 / 暗一点
+喇叭：大声 / 小声 / volume 80；先测：--speak 你好
 说话：--listen；不会的句子交给 Cursor（CURSOR_API_KEY）
 其它：status  rgb 255 176 80  help  q
 """
@@ -256,6 +259,10 @@ def parse_line(line: str) -> Command:
         return Command("brightness_set", 100, "最亮。")
     if low in {"最暗"}:
         return Command("brightness_set", 20, "暗下来。")
+    if low in {"大声", "大声点", "音量大"}:
+        return Command("volume_delta", 20, "大声一点。")
+    if low in {"小声", "小声点", "音量小"}:
+        return Command("volume_delta", -20, "小声一点。")
 
     parts = text.split()
     if parts[0].lower() == "volume" and len(parts) == 2 and parts[1].isdigit():
@@ -307,7 +314,10 @@ def parse_line(line: str) -> Command:
 
 
 def command_phrases() -> List[str]:
-    extra = ("亮一点", "亮一些", "亮点", "暗一点", "暗一些", "暗点", "最亮", "最暗", "帮助", "退出")
+    extra = (
+        "亮一点", "亮一些", "亮点", "暗一点", "暗一些", "暗点", "最亮", "最暗",
+        "大声", "大声点", "音量大", "小声", "小声点", "音量小", "帮助", "退出",
+    )
     phrases = set(LIGHT_ONLY) | set(ALIASES) | set(RECORDINGS) | set(extra)
     return sorted(phrases, key=lambda item: (-len(item), item))
 
@@ -347,6 +357,130 @@ express：点头/摇头/打招呼等动作（feeling 用 你好、点头、摇�
 set_mood：只改灯（暖光、冷光、关灯、开灯、亮一点、暗一点）。
 set_rgb：用户说了具体颜色时用。
 """
+
+
+def _bin(name: str) -> Optional[str]:
+    found = shutil.which(name)
+    if found:
+        return found
+    candidate = Path("/usr/bin") / name
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return str(candidate)
+    return None
+
+
+def find_tts_engine() -> str:
+    forced = (os.environ.get("LELAMP_TTS") or "").strip().lower()
+    if forced:
+        return forced
+    if _bin("piper") and (os.environ.get("LELAMP_PIPER_MODEL") or "").strip():
+        return "piper"
+    if _bin("espeak-ng"):
+        return "espeak-ng"
+    if _bin("espeak"):
+        return "espeak"
+    return "none"
+
+
+def _espeak_cmd(binary: str, text: str, volume: int) -> List[str]:
+    amplitude = max(10, min(200, round(max(0, min(100, volume)) * 2)))
+    voice = os.environ.get("LELAMP_ESPEAK_VOICE", "zh")
+    return [binary, "-v", voice, "-a", str(amplitude), "--", text]
+
+
+def _speak_espeak(text: str, volume: int) -> str:
+    for name in ("espeak-ng", "espeak"):
+        binary = _bin(name)
+        if not binary:
+            continue
+        cmd = _espeak_cmd(binary, text, volume)
+        result = subprocess.run(cmd, check=False, timeout=60)
+        if result.returncode == 0:
+            return name
+        # Some images only ship cmn / zh-cn.
+        for voice in ("cmn", "zh-cn", "Chinese"):
+            alt = _espeak_cmd(binary, text, volume)
+            alt[2] = voice
+            result = subprocess.run(alt, check=False, timeout=60)
+            if result.returncode == 0:
+                return name
+        print(f"espeak failed ({result.returncode})")
+        return "error"
+    return "none"
+
+
+def _speak_piper(text: str) -> str:
+    piper = _bin("piper")
+    aplay = _bin("aplay")
+    model = (os.environ.get("LELAMP_PIPER_MODEL") or "").strip()
+    if not piper or not aplay or not model or not Path(model).is_file():
+        print("piper 需要 LELAMP_PIPER_MODEL 指向 .onnx，并且系统有 aplay。")
+        return "none"
+    rate = os.environ.get("LELAMP_PIPER_RATE", "22050")
+    synth = subprocess.Popen(
+        [piper, "--model", model, "--output_raw"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    play = subprocess.Popen(
+        [aplay, "-r", str(rate), "-f", "S16_LE", "-t", "raw", "-q", "-"],
+        stdin=synth.stdout,
+        stderr=subprocess.DEVNULL,
+    )
+    if synth.stdin is not None:
+        synth.stdin.write(text.encode("utf-8"))
+        synth.stdin.close()
+    if synth.stdout is not None:
+        synth.stdout.close()
+    play.wait(timeout=60)
+    synth.wait(timeout=60)
+    return "piper"
+
+
+def speak_text(
+    text: str,
+    *,
+    sim: bool = False,
+    volume: int = 80,
+    enabled: bool = True,
+) -> str:
+    """Speak Chinese on the default ALSA device (ReSpeaker). No OpenAI."""
+    cleaned = " ".join((text or "").split())
+    if not cleaned or not enabled:
+        return ""
+    if sim:
+        print(f"[sim] speak {cleaned}")
+        return "sim"
+    engine = find_tts_engine()
+    try:
+        if engine in {"espeak-ng", "espeak"}:
+            used = _speak_espeak(cleaned, volume)
+            if used in {"espeak-ng", "espeak"}:
+                return used
+        elif engine == "piper":
+            return _speak_piper(cleaned)
+        elif engine == "none":
+            pass
+        else:
+            print(f"unknown LELAMP_TTS={engine!r} (use espeak-ng or piper)")
+            return "error"
+    except subprocess.TimeoutExpired:
+        print("speak timed out")
+        return "error"
+    except Exception as exc:
+        print(f"speak failed: {exc}")
+        return "error"
+    print("没有 TTS。先装中文语音：sudo apt install -y espeak-ng")
+    return "none"
+
+
+def utter(lamp: "LocalLamp", text: str, *, speak: bool = True) -> None:
+    if not text:
+        return
+    print(text)
+    if speak:
+        lamp.speak(text)
 
 
 def load_runtime_env() -> None:
@@ -688,17 +822,15 @@ def vosk_listen_worker(
 def dispatch_text(lamp: LocalLamp, raw: str, brain: Optional[CursorLampSession] = None) -> str:
     cmd = parse_line(raw)
     if cmd.kind == "quit":
-        print(cmd.reply)
+        utter(lamp, cmd.reply)
         return "quit"
     if cmd.kind == "unknown" and brain is not None:
         print("Cursor …")
         reply = brain.ask(raw)
-        if reply:
-            print(reply)
+        utter(lamp, reply)
         return "chat"
     text = lamp.apply(cmd)
-    if text:
-        print(text)
+    utter(lamp, text, speak=cmd.kind not in {"help", "status", "noop"})
     return cmd.kind
 
 
@@ -713,8 +845,7 @@ def apply_speech(
         if brain is not None:
             print("Cursor …")
             reply = brain.ask(transcript)
-            if reply:
-                print(reply)
+            utter(lamp, reply)
             return "chat"
         print(f"听到「{transcript}」，但不是灯的指令。")
         return "unknown"
@@ -783,14 +914,19 @@ class LocalLamp:
         lamp_id: str,
         led_count: int,
         brightness: int,
+        volume: int = 80,
+        speak_enabled: bool = True,
     ) -> None:
         self.sim = sim
         self.port = port
         self.lamp_id = lamp_id
         self.led_count = led_count
         self.brightness = max(0, min(100, brightness))
+        self.volume = max(0, min(100, volume))
+        self.speak_enabled = speak_enabled
         self.base_rgb: Tuple[int, int, int] = MOOD_RGB["warm"]
         self.last_rgb: Tuple[int, int, int] = (0, 0, 0)
+        self.last_spoken = ""
         self.last_expression = ""
         self.motors = None
         self.rgb = None
@@ -894,6 +1030,17 @@ class LocalLamp:
         self.rgb.dispatch("solid", scaled)
         self._wait_hw(timeout=5.0)
 
+    def speak(self, text: str) -> str:
+        used = speak_text(
+            text,
+            sim=self.sim,
+            volume=self.volume,
+            enabled=self.speak_enabled,
+        )
+        if used:
+            self.last_spoken = " ".join((text or "").split())
+        return used
+
     def apply(self, cmd: Command) -> str:
         if cmd.kind == "noop":
             return ""
@@ -902,7 +1049,7 @@ class LocalLamp:
         if cmd.kind == "status":
             return (
                 f"sim={self.sim} expression={self.last_expression or '-'} "
-                f"rgb={self.last_rgb} brightness={self.brightness}"
+                f"rgb={self.last_rgb} brightness={self.brightness} volume={self.volume}"
             )
         if cmd.kind == "express":
             rec = str(cmd.payload)
@@ -930,7 +1077,11 @@ class LocalLamp:
             self._apply_rgb((int(rgb[0]), int(rgb[1]), int(rgb[2])))
             return cmd.reply
         if cmd.kind == "volume":
-            return cmd.reply + "（Stage 1 还没接管喇叭，先记下。）"
+            self.volume = int(cmd.payload)
+            return cmd.reply
+        if cmd.kind == "volume_delta":
+            self.volume = max(0, min(100, self.volume + int(cmd.payload)))
+            return f"{cmd.reply} 音量 {self.volume}%"
         return cmd.reply
 
     def wake(self) -> None:
@@ -939,10 +1090,11 @@ class LocalLamp:
         self._apply_rgb(MOOD_RGB[mood])
         self._play("wake_up")
         print(f"台灯醒了。现在 {mood} 光，亮度 {self.brightness}%。输入 help 看命令。")
+        self.speak("你好，我是台灯。")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="LeLamp local Stages 1–3 (Cursor API, no OpenAI)")
+    parser = argparse.ArgumentParser(description="LeLamp local Stages 1–4 (Cursor API + speaker, no OpenAI)")
     parser.add_argument("--sim", action="store_true", help="no motors/LED, print actions")
     parser.add_argument("--port", default=os.environ.get("LELAMP_PORT", "/dev/ttyACM0"))
     parser.add_argument("--id", dest="lamp_id", default=os.environ.get("LELAMP_ID", "lelamp"))
@@ -951,6 +1103,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--listen", action="store_true", help="Stage 2: Vosk keywords on the mic")
     parser.add_argument("--download-vosk", action="store_true", help="download offline Chinese Vosk model")
     parser.add_argument("--say", action="append", default=[], help="inject a spoken phrase (repeatable)")
+    parser.add_argument("--speak", action="append", default=[], help="Stage 4: speak this sentence on the speaker")
+    parser.add_argument("--no-speak", action="store_true", help="print replies only, do not use the speaker")
     parser.add_argument("--device", type=int, default=None, help="sounddevice input index")
     parser.add_argument("--model", type=Path, default=None, help="path to vosk-model-small-cn-0.22")
     parser.add_argument("--ask", action="append", default=[], help="send one sentence to Cursor API (repeatable)")
@@ -987,6 +1141,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         lamp_id=args.lamp_id,
         led_count=args.led_count,
         brightness=70,
+        speak_enabled=not args.no_speak,
     )
     brain = None
     if not args.no_cursor and (args.ask or os.environ.get("CURSOR_API_KEY")):
@@ -995,15 +1150,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if not args.no_wake:
             lamp.wake()
+        for phrase in args.speak:
+            lamp.speak(phrase)
         for phrase in args.say:
             if apply_speech(lamp, phrase) == "quit":
                 return 0
         for text in args.ask:
             print(f"你：{text}")
             reply = brain.ask(text) if brain is not None else ""
-            if reply:
-                print(reply)
-        if (args.say or args.ask) and not args.listen:
+            utter(lamp, reply)
+        if (args.say or args.ask or args.speak) and not args.listen:
             return 0
         if args.listen:
             model_path = args.model if args.model is not None else vosk_model_dir()
