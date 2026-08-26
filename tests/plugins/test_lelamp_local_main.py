@@ -17,6 +17,7 @@ from plugins.lelamp.local_main import (
     hardware_spoken_command,
     join_speech,
     looks_complete_utterance,
+    looks_like_look,
     parse_line,
     pick_asr,
     resolve_feeling,
@@ -780,3 +781,68 @@ def test_conversation_play_returns_while_motion_runs():
     assert lamp.last_expression == "nod"
     released.set()
     lamp._wait_hw(timeout=2.0)
+
+
+def test_looks_like_look_phrases():
+    assert looks_like_look("look") is True
+    assert looks_like_look("what do you see") is True
+    assert looks_like_look("can you see me") is True
+    assert looks_like_look("warm light") is False
+    assert looks_like_look("how are you") is False
+
+
+def test_sim_snap_writes_a_still():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    path = lamp.snap()
+    assert path is not None
+    assert path.is_file()
+    assert lamp.last_expression == "scanning"
+    assert lamp.last_photo == str(path)
+    assert "I'm looking." in lamp.apply(parse_line("snap"))
+
+
+def test_look_tool_uses_sim_camera():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    out = execute_lamp_tool(lamp, "look", {})
+    assert "Photo saved" in out
+    assert lamp.last_expression == "scanning"
+
+
+def test_what_do_you_see_goes_to_cursor():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    seen = []
+
+    class Brain:
+        def ask(self, text, photo=None):
+            seen.append(text)
+            return "I see you."
+
+    assert apply_speech(lamp, "what do you see", Brain()) == "chat"
+    assert seen == ["what do you see"]
+
+
+def test_main_sim_snap(capsys):
+    from plugins.lelamp import local_main
+
+    assert local_main.main(["--sim", "--no-wake", "--snap"]) == 0
+    out = capsys.readouterr().out
+    assert "[sim] camera snap" in out
+    assert "camera=sim" in out

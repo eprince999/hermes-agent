@@ -13,7 +13,8 @@ Keep official ``main.py`` untouched. From the runtime repo root:
     sudo uv run python local_main.py --speak "Hey. I'm here with you."
     sudo uv run python local_main.py --download-vosk
     sudo uv run python local_main.py --download-piper
-    sudo uv run python local_main.py --ask "Do you agree warm light is nicer?"
+    sudo uv run python local_main.py --snap
+    sudo uv run python local_main.py --ask "What do you see?"
     sudo uv run python local_main.py --snapshot
 
 Stage 3 uses Cursor's official API (cursor-sdk + CURSOR_API_KEY from
@@ -50,7 +51,7 @@ from urllib.request import Request, urlopen, urlretrieve
 
 # Bump when a stage lands. Printed at startup so a snapshot is identifiable.
 AGENT_STAGE = 3
-AGENT_LABEL = "keyboard + vosk(en) + cursor-sdk + tts"
+AGENT_LABEL = "keyboard + vosk(en) + cursor-sdk + tts + cam"
 
 
 def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = None) -> Path:
@@ -212,6 +213,7 @@ Speaker: louder / quieter / volume 100; test: --speak hello
 Voice: Piper companion (ryan) after --download-piper; espeak is fallback only
 Talk: say hello lamp once, then keep chatting.
       Agree → nod. Disagree → shake head.
+Camera: look / what do you see / snap  (one still, not a live stream)
 Other: status  rgb 255 176 80  help  q
 """
 
@@ -330,6 +332,9 @@ def parse_line(line: str) -> Command:
             return Command("unknown", text, "Each RGB value has to be 0 to 255.")
         return Command("rgb", rgb, f"Color {rgb}")
 
+    if low in {"snap", "photo", "take a photo", "take a picture"}:
+        return Command("snap", None, "I'm looking.")
+
     if text in LIGHT_ONLY or low in LIGHT_ONLY:
         mood = LIGHT_ONLY.get(text) or LIGHT_ONLY[low]
         spoken = {
@@ -412,6 +417,20 @@ def hardware_spoken_command(transcript: str) -> Optional[str]:
             if rest and parse_line(rest).kind in _HARDWARE_KINDS:
                 return rest
     return None
+
+
+def looks_like_look(text: str) -> bool:
+    compact = _compact_speech(text)
+    if not compact:
+        return False
+    if compact in {"look", "see", "snap", "photo", "picture", "camera"}:
+        return True
+    needles = (
+        "look at", "take a look", "what do you see", "what can you see",
+        "can you see", "do you see", "who is there", "whats in front",
+        "in front of you", "take a photo", "take a picture",
+    )
+    return any(n in compact for n in needles)
 
 
 def direct_spoken_command(transcript: str) -> Optional[str]:
@@ -617,9 +636,11 @@ When you have a feeling, call express first, then talk:
 - happy → feeling=happy; sad → feeling=sad
 
 If they chat or ask your opinion, nod or shake from your stance, then speak.
+If they ask what you see, who is there, or to look, call look first, then talk about the photo.
 If the utterance is clearly unfinished, just say "mm".
 set_mood: light only (warm, cool, off, on, brighter, dimmer).
 set_rgb: only when they give an exact color.
+look: take one still from the Pi camera. Do not keep a video stream open.
 """
 
 
@@ -728,6 +749,71 @@ def describe_tts() -> str:
             )
         return "tts=espeak  piper model is present but piper-tts is not installed (uv add piper-tts)"
     return "tts=none  install piper-tts or espeak-ng"
+
+
+def camera_bin() -> Optional[str]:
+    for name in ("rpicam-still", "libcamera-still", "fswebcam"):
+        if _bin(name):
+            return name
+    return None
+
+
+def describe_camera(*, sim: bool = False) -> str:
+    if sim:
+        return "camera=sim  stills only, on demand"
+    name = camera_bin()
+    if name:
+        return f"camera={name}  stills only, on demand (not a live stream)"
+    return "camera=none  install rpicam-still or fswebcam; look/snap is skipped"
+
+
+def capture_still(dest: Optional[Path] = None, *, sim: bool = False) -> Optional[Path]:
+    """One JPEG, then close the camera. Live video would starve listen/speak."""
+    target = dest or (Path(tempfile.gettempdir()) / "lelamp-see.jpg")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if sim:
+        target.write_bytes(b"sim-camera")
+        print(f"[sim] camera snap {target}")
+        return target
+    cmds: List[List[str]] = []
+    if _bin("rpicam-still"):
+        cmds.append(
+            ["rpicam-still", "-n", "-t", "400", "--width", "1280", "--height", "720", "-o", str(target)]
+        )
+    if _bin("libcamera-still"):
+        cmds.append(
+            ["libcamera-still", "-n", "-t", "400", "--width", "1280", "--height", "720", "-o", str(target)]
+        )
+    if _bin("fswebcam"):
+        cmds.append(["fswebcam", "-r", "1280x720", "--no-banner", "-q", str(target)])
+    for cmd in cmds:
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=12, check=False)
+        except Exception:
+            continue
+        if result.returncode == 0 and target.is_file() and target.stat().st_size > 1000:
+            print(f"camera snap {target} ({target.stat().st_size} bytes)")
+            return target
+    index = os.environ.get("LELAMP_CAMERA", "0")
+    try:
+        import cv2  # type: ignore
+
+        cap = cv2.VideoCapture(int(index) if str(index).isdigit() else index)
+        try:
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            ok, frame = cap.read()
+        finally:
+            cap.release()
+        if ok and frame is not None:
+            cv2.imwrite(str(target), frame)
+            if target.is_file() and target.stat().st_size > 1000:
+                print(f"camera snap {target} ({target.stat().st_size} bytes)")
+                return target
+    except Exception:
+        pass
+    print("No camera still. On a Pi Camera: sudo apt install -y rpicam-apps")
+    return None
 
 
 def _espeak_cmd(binary: str, text: str, volume: int, lang: str = "en") -> List[str]:
@@ -1075,6 +1161,11 @@ def execute_lamp_tool(lamp: "LocalLamp", name: str, args: Optional[dict] = None)
         if cmd.kind == "unknown":
             return cmd.reply
         return lamp.apply(cmd) or f"ok {cmd.kind}"
+    if name == "look":
+        path = lamp.snap()
+        if path is None:
+            return "No camera still. I cannot see right now."
+        return f"Photo saved at {path}. Look at that image and describe it."
     return f"unknown tool {name}"
 
 
@@ -1191,6 +1282,19 @@ class CursorLampSession:
         def _rgb(args, _context=None):
             return execute_lamp_tool(lamp, "set_rgb", args)
 
+        def _look(args, _context=None):
+            path = lamp.snap()
+            if path is None:
+                return "No camera still. I cannot see right now."
+            dest = path
+            if self._workspace:
+                dest = self._workspace / "what_i_see.jpg"
+                try:
+                    shutil.copy2(path, dest)
+                except OSError:
+                    dest = path
+            return f"Photo saved at {dest}. Open that image and describe what you see."
+
         self._agent = create_cursor_agent(
             model=model,
             api_key=key,
@@ -1233,14 +1337,34 @@ class CursorLampSession:
                         },
                         execute=_rgb,
                     ),
+                    "look": CustomTool(
+                        description="Take one still from the lamp camera. Use when they ask what you see. Do not stream video.",
+                        input_schema={"type": "object", "properties": {}},
+                        execute=_look,
+                    ),
                 },
             ),
         )
         print(f"Cursor agent ready  model={model}")
 
-    def ask(self, text: str) -> str:
+    def ask(self, text: str, *, photo: Optional[Path] = None) -> str:
         self.start()
-        run = self._agent.send(text.strip())
+        prompt = (text or "").strip()
+        if photo is None and looks_like_look(prompt):
+            photo = self.lamp.snap()
+        if photo is not None and self._workspace is not None:
+            dest = self._workspace / "what_i_see.jpg"
+            try:
+                shutil.copy2(photo, dest)
+                prompt = (
+                    f"{prompt}\n\n"
+                    f"A still from my camera is at {dest}. Open that image and answer."
+                )
+            except OSError:
+                prompt = f"{prompt}\n\nI took a photo at {photo}."
+        elif looks_like_look(text) and photo is None:
+            prompt = f"{prompt}\n\nNo camera still is available. Say that briefly."
+        run = self._agent.send(prompt)
         reply = _cursor_run_text(run)
         return reply
 
@@ -1414,11 +1538,22 @@ def dispatch_text(lamp: LocalLamp, raw: str, brain: Optional[CursorLampSession] 
     if cmd.kind == "quit":
         utter(lamp, cmd.reply)
         return "quit"
+    if cmd.kind == "snap":
+        path = lamp.snap()
+        if brain is not None:
+            reply = brain.ask("Look at the photo I just took. What do you see?", photo=path)
+            utter(lamp, reply)
+            return "chat"
+        utter(lamp, cmd.reply if path else "I can't see right now.")
+        return "snap"
     if cmd.kind == "unknown" and brain is not None:
         print("Cursor …")
         reply = brain.ask(raw)
         utter(lamp, reply)
         return "chat"
+    text = lamp.apply(cmd)
+    utter(lamp, text, speak=cmd.kind not in {"help", "status", "noop"})
+    return cmd.kind
     text = lamp.apply(cmd)
     utter(lamp, text, speak=cmd.kind not in {"help", "status", "noop"})
     return cmd.kind
@@ -1588,6 +1723,7 @@ class LocalLamp:
         self.last_rgb: Tuple[int, int, int] = (0, 0, 0)
         self.last_spoken = ""
         self.last_expression = ""
+        self.last_photo = ""
         self.motors = None
         self.rgb = None
         self._motion_thread = None
@@ -1707,6 +1843,14 @@ class LocalLamp:
         self.rgb.dispatch("solid", scaled)
         self._wait_hw(timeout=5.0)
 
+    def snap(self) -> Optional[Path]:
+        self._play("scanning", wait=False)
+        self._apply_rgb(EXPRESSION_RGB["scanning"])
+        photo = capture_still(sim=self.sim)
+        if photo is not None:
+            self.last_photo = str(photo)
+        return photo
+
     def speak(self, text: str) -> str:
         used = speak_text(
             text,
@@ -1726,13 +1870,19 @@ class LocalLamp:
         if cmd.kind == "status":
             return (
                 f"sim={self.sim} expression={self.last_expression or '-'} "
-                f"rgb={self.last_rgb} brightness={self.brightness} volume={self.volume}"
+                f"rgb={self.last_rgb} brightness={self.brightness} volume={self.volume} "
+                f"photo={self.last_photo or '-'}"
             )
         if cmd.kind == "express":
             rec = str(cmd.payload)
             self._play(rec, wait=wait_motion)
             self._apply_rgb(EXPRESSION_RGB[rec])
             return cmd.reply
+        if cmd.kind == "snap":
+            path = self.snap()
+            if path is None:
+                return "I can't see right now."
+            return f"{cmd.reply} Photo {path}."
         if cmd.kind == "mood":
             mood = str(cmd.payload)
             if mood == "auto":
@@ -1803,6 +1953,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", type=Path, default=None, help="path to vosk-model-small-en-us-0.15")
     parser.add_argument("--en-model", type=Path, default=None, help="alias for --model")
     parser.add_argument("--ask", action="append", default=[], help="send one sentence to Cursor API (repeatable)")
+    parser.add_argument("--snap", action="store_true", help="take one camera still and exit (unless --listen/--ask)")
     parser.add_argument("--no-cursor", action="store_true", help="never call Cursor, even if CURSOR_API_KEY is set")
     parser.add_argument("--show-stage", action="store_true", help="print stage number and exit")
     parser.add_argument(
@@ -1832,9 +1983,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.download_piper:
         download_piper_voice()
         fetched = True
-    if fetched and not (args.listen or args.speak or args.say or args.ask):
+    if fetched and not (args.listen or args.speak or args.say or args.ask or args.snap):
         return 0
     print(describe_tts())
+    print(describe_camera(sim=args.sim))
     if args.ask and args.no_cursor:
         raise SystemExit("--ask needs Cursor. Remove --no-cursor and set CURSOR_API_KEY.")
     lamp = LocalLamp(
@@ -1864,6 +2016,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if not args.no_wake:
             lamp.wake()
+        if args.snap:
+            path = lamp.snap()
+            if path is None and not args.sim:
+                return 1
+            if not (args.listen or args.speak or args.say or args.ask):
+                return 0
         for phrase in args.speak:
             lamp.speak(phrase)
         for phrase in args.say:
