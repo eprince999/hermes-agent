@@ -570,6 +570,60 @@ def test_english_keywords_parse_and_reply():
     assert lamp.last_rgb == (0, 0, 0)
 
 
+def test_voice_desk_modes_are_local_hardware():
+    assert parse_line("study mode").kind == "scene"
+    assert parse_line("study mode").payload["mood"] == "study"
+    assert parse_line("reading mode").payload["pose"] == "read"
+    assert parse_line("white light").kind == "mood"
+    assert parse_line("white light").payload == "white"
+    assert parse_line("yellow light").payload == "yellow"
+    assert parse_line("look down").kind == "scene"
+    assert parse_line("look down").payload["pose"] == "closer"
+    assert parse_line("closer").payload["pose"] == "closer"
+    assert parse_line("学习模式").payload["mood"] == "study"
+    assert parse_line("黄光").payload == "yellow"
+    assert parse_line("亮一点").kind == "brightness_delta"
+    assert parse_line("look down").kind != "snap"
+    assert hardware_spoken_command("study mode") == "study mode"
+    assert hardware_spoken_command("reading mode") == "reading mode"
+    assert hardware_spoken_command("closer") == "closer"
+
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    lamp.apply(parse_line("study mode"))
+    assert lamp.last_expression == "study"
+    assert lamp.brightness == 100
+    assert lamp.last_rgb == (255, 255, 255)
+
+    lamp.apply(parse_line("reading mode"))
+    assert lamp.last_expression == "read"
+    assert lamp.brightness == 80
+
+    lamp.apply(parse_line("yellow light"))
+    assert lamp.base_rgb[0] == 255
+    assert lamp.base_rgb[1] > lamp.base_rgb[2]
+
+    lamp.apply(parse_line("closer"))
+    assert lamp.last_expression == "closer"
+
+    seen = []
+
+    class Brain:
+        def ask(self, text):
+            seen.append(text)
+            return "nope"
+
+    assert apply_speech(lamp, "study mode", Brain()) == "scene"
+    assert apply_speech(lamp, "lights off", Brain()) == "mood"
+    assert seen == []
+    assert lamp.last_rgb == (0, 0, 0)
+
+
 def test_english_helpers():
     assert speech_lang("what day is it") == "en"
     assert speech_lang("q") == "en"

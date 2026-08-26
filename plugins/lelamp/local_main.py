@@ -14,9 +14,8 @@ Keep official ``main.py`` untouched. From the runtime repo root:
     sudo uv run python local_main.py --snap
     sudo uv run python local_main.py --snapshot
 
-Stage 3: Vosk hears English, Cursor maps the meaning to a pose
-(nod / shake / curious / …). No spoken replies. No personality prompt.
-Lights-off and volume stay local. Do not clone celebrity / TV voices.
+Stage 3: Vosk hears English. Desk commands (lights, brightness, study/reading,
+closer) run locally. Cursor only maps leftover talk to a pose. No spoken replies.
 
 Roadmap:
   1. keyboard + motors + RGB
@@ -142,20 +141,78 @@ MOOD_RGB: Dict[str, Tuple[int, int, int]] = {
     "alert": (255, 60, 50),
     "night": (255, 120, 40),
     "focus": (180, 220, 255),
+    "study": (255, 255, 255),
+    "read": (255, 196, 70),
+    "white": (255, 255, 255),
+    "yellow": (255, 210, 40),
     "off": (0, 0, 0),
 }
+
+# Desk poses in the same units as official recordings (about -100..100).
+# Yaw stays facing the desk; pitch folds the neck toward a book.
+POSES: Dict[str, Dict[str, float]] = {
+    "study": {
+        "base_yaw.pos": 0.0,
+        "base_pitch.pos": -40.0,
+        "elbow_pitch.pos": 70.0,
+        "wrist_roll.pos": 0.0,
+        "wrist_pitch.pos": 18.0,
+    },
+    "read": {
+        "base_yaw.pos": 0.0,
+        "base_pitch.pos": -52.0,
+        "elbow_pitch.pos": 48.0,
+        "wrist_roll.pos": 0.0,
+        "wrist_pitch.pos": 42.0,
+    },
+}
+
+_POSE_LIMITS: Dict[str, Tuple[float, float]] = {
+    "base_yaw.pos": (-90.0, 90.0),
+    "base_pitch.pos": (-70.0, -15.0),
+    "elbow_pitch.pos": (25.0, 90.0),
+    "wrist_roll.pos": (-30.0, 30.0),
+    "wrist_pitch.pos": (0.0, 70.0),
+}
+
+
+def _clamp_pose(pose: Dict[str, float]) -> Dict[str, float]:
+    out = dict(pose)
+    for key, (lo, hi) in _POSE_LIMITS.items():
+        if key in out:
+            out[key] = max(lo, min(hi, float(out[key])))
+    return out
+
+
+def _closer_pose(present: Optional[Dict[str, float]]) -> Dict[str, float]:
+    """Nudge the head down toward a book. Safe to say more than once."""
+    base = dict(present) if present else dict(POSES["read"])
+    base["base_pitch.pos"] = float(base.get("base_pitch.pos", -52.0)) - 8.0
+    base["elbow_pitch.pos"] = float(base.get("elbow_pitch.pos", 48.0)) - 8.0
+    base["wrist_pitch.pos"] = float(base.get("wrist_pitch.pos", 42.0)) + 8.0
+    return _clamp_pose(base)
 
 LIGHT_ONLY: Dict[str, str] = {
     "lights on": "auto",
     "light on": "auto",
     "turn on": "auto",
+    "turn on the light": "auto",
+    "turn on the lights": "auto",
+    "switch on": "auto",
+    "开灯": "auto",
     "lights off": "off",
     "light off": "off",
     "turn off": "off",
+    "turn off the light": "off",
+    "turn off the lights": "off",
+    "switch off": "off",
+    "关灯": "off",
     "warm light": "warm",
     "cool light": "cool",
     "night light": "night",
     "focus light": "focus",
+    "white light": "white",
+    "yellow light": "yellow",
     "on": "auto",
     "off": "off",
     "warm": "warm",
@@ -163,6 +220,52 @@ LIGHT_ONLY: Dict[str, str] = {
     "auto": "auto",
     "night": "night",
     "focus": "focus",
+    "white": "white",
+    "yellow": "yellow",
+    "白光": "white",
+    "黄光": "yellow",
+    "暖光": "warm",
+    "冷光": "cool",
+}
+
+# Light + pose scenes. Longer phrases first in parse_line.
+SCENE_PHRASES: Dict[str, Dict[str, object]] = {
+    "study mode": {"mood": "study", "brightness": 100, "pose": "study"},
+    "reading mode": {"mood": "read", "brightness": 80, "pose": "read"},
+    "read mode": {"mood": "read", "brightness": 80, "pose": "read"},
+    "learning mode": {"mood": "study", "brightness": 100, "pose": "study"},
+    "study": {"mood": "study", "brightness": 100, "pose": "study"},
+    "reading": {"mood": "read", "brightness": 80, "pose": "read"},
+    "学习模式": {"mood": "study", "brightness": 100, "pose": "study"},
+    "阅读模式": {"mood": "read", "brightness": 80, "pose": "read"},
+    "学习": {"mood": "study", "brightness": 100, "pose": "study"},
+    "阅读": {"mood": "read", "brightness": 80, "pose": "read"},
+    "closer to the book": {"pose": "closer"},
+    "closer to the page": {"pose": "closer"},
+    "closer please": {"pose": "closer"},
+    "lean down": {"pose": "closer"},
+    "look down": {"pose": "closer"},
+    "head down": {"pose": "closer"},
+    "lower please": {"pose": "closer"},
+    "come closer": {"pose": "closer"},
+    "closer": {"pose": "closer"},
+    "lower": {"pose": "closer"},
+    "低头": {"pose": "closer"},
+    "靠近": {"pose": "closer"},
+    "近一点": {"pose": "closer"},
+    "离书更近": {"pose": "closer"},
+    "离书近一点": {"pose": "closer"},
+}
+
+BRIGHTNESS_UP = {
+    "brighter", "brighter please", "more light", "brightness up",
+    "turn up", "increase brightness", "a bit brighter", "too dark",
+    "亮一点", "亮一些", "亮一点吧", "太暗了", "更亮",
+}
+BRIGHTNESS_DOWN = {
+    "dimmer", "dimmer please", "less light", "brightness down",
+    "turn down", "decrease brightness", "a bit dimmer", "too bright", "dim",
+    "暗一点", "暗一些", "暗一点吧", "太亮了", "更暗",
 }
 
 EXPRESSION_REPLIES: Dict[str, str] = {
@@ -202,12 +305,13 @@ _EN_QUESTION_STARTS = {
     "do", "does", "can", "could", "is", "are", "please",
 }
 
-HELP_TEXT = """Stage 3 lamp (Vosk hears, model poses, no voice)
-Motion comes from meaning: agree → nod, no → shake, hello → wake_up
-Light: lights on / lights off / warm / cool / brighter / dimmer
-Camera: look / snap  (one still, not a live stream)
-Other: status  rgb 255 176 80  help  q
-No spoken replies. Type q to quit.
+HELP_TEXT = """Stage 3 lamp (voice control, silent)
+Light: lights on / off   brighter / dimmer   white / yellow
+Modes: study mode (white)   reading mode (yellow, lean to the book)
+Pose: closer / look down / lean down
+Camera: look / snap
+Other: status  help  q
+No spoken replies.
 """
 
 VOSK_MODEL_NAME = "vosk-model-small-cn-0.22"
@@ -291,7 +395,12 @@ def parse_line(line: str) -> Command:
     if not text:
         return Command("noop", None, "")
 
-    low = text.lower()
+    low = _compact_speech(text)
+    if low.endswith(" please"):
+        low = low[: -len(" please")].strip()
+    if not low:
+        return Command("noop", None, "")
+
     if low in {"q", "quit", "exit", "bye", "goodbye"}:
         return Command("quit", None, "Okay. I'll be right here.")
     if low in {"help", "h", "?"}:
@@ -299,24 +408,27 @@ def parse_line(line: str) -> Command:
     if low in {"status"}:
         return Command("status", None, "")
 
-    if low in {"brighter", "brighter please"}:
+    if low in BRIGHTNESS_UP or low in {"brighter please"}:
         return Command("brightness_delta", 15, "A little brighter.")
-    if low in {"dimmer", "dimmer please"}:
+    if low in BRIGHTNESS_DOWN or low in {"dimmer please"}:
         return Command("brightness_delta", -15, "A little dimmer.")
-    if low in {"brightest"}:
+    if low in {"brightest", "最亮"}:
         return Command("brightness_set", 100, "As bright as I can go.")
-    if low in {"dimmest"}:
+    if low in {"dimmest", "最暗"}:
         return Command("brightness_set", 20, "Dimmed down.")
     if low in {"louder"}:
         return Command("volume_delta", 20, "I'll speak up.")
     if low in {"quieter"}:
         return Command("volume_delta", -20, "I'll keep it down.")
 
-    parts = text.split()
-    if parts[0].lower() == "volume" and len(parts) == 2 and parts[1].isdigit():
+    parts = low.split()
+    if parts[0] == "volume" and len(parts) == 2 and parts[1].isdigit():
         vol = max(0, min(100, int(parts[1])))
         return Command("volume", vol, f"Volume is {vol} percent.")
-    if parts[0].lower() == "rgb" and len(parts) == 4:
+    if parts[0] == "brightness" and len(parts) == 2 and parts[1].isdigit():
+        bri = max(0, min(100, int(parts[1])))
+        return Command("brightness_set", bri, f"Brightness {bri} percent.")
+    if parts[0] == "rgb" and len(parts) == 4:
         try:
             rgb = tuple(int(p) for p in parts[1:4])
         except ValueError:
@@ -325,11 +437,15 @@ def parse_line(line: str) -> Command:
             return Command("unknown", text, "Each RGB value has to be 0 to 255.")
         return Command("rgb", rgb, f"Color {rgb}")
 
+    for phrase, payload in sorted(SCENE_PHRASES.items(), key=lambda item: -len(item[0])):
+        if low == phrase:
+            return Command("scene", dict(payload), "")
+
     if low in {"snap", "photo", "take a photo", "take a picture"} or looks_like_look(low):
         return Command("snap", None, "I'm looking.")
 
-    if text in LIGHT_ONLY or low in LIGHT_ONLY:
-        mood = LIGHT_ONLY.get(text) or LIGHT_ONLY[low]
+    if low in LIGHT_ONLY:
+        mood = LIGHT_ONLY[low]
         spoken = {
             "auto": "Lights on, matching the time of day.",
             "off": "Lights off.",
@@ -337,16 +453,20 @@ def parse_line(line: str) -> Command:
             "cool": "Cool light.",
             "night": "Night light.",
             "focus": "Focus light.",
+            "study": "Study light.",
+            "read": "Reading light.",
+            "white": "White light.",
+            "yellow": "Yellow light.",
         }.get(mood, f"Light set to {mood}.")
         return Command("mood", mood, spoken)
 
     try:
-        recording = resolve_expression(text)
+        recording = resolve_expression(low)
     except ValueError:
         return Command(
             "unknown",
             text,
-            "I don't know that one yet. Try hello, nod, warm, or lights off. Type help for the rest.",
+            "Try lights on, study mode, reading mode, yellow, brighter, or closer.",
         )
     return Command("express", recording, spoken_for(recording, text))
 
@@ -356,7 +476,15 @@ def command_phrases() -> List[str]:
         "brighter", "dimmer", "louder", "quieter", "brightest", "dimmest",
         "help", "quit", "bye",
     )
-    phrases = set(LIGHT_ONLY) | set(ALIASES) | set(RECORDINGS) | set(extra)
+    phrases = (
+        set(LIGHT_ONLY)
+        | set(ALIASES)
+        | set(RECORDINGS)
+        | set(SCENE_PHRASES)
+        | set(BRIGHTNESS_UP)
+        | set(BRIGHTNESS_DOWN)
+        | set(extra)
+    )
     return sorted(phrases, key=lambda item: (-len(item), item))
 
 
@@ -392,12 +520,13 @@ def extract_spoken_command(transcript: str) -> Optional[str]:
 _HARDWARE_KINDS = {
     "mood", "brightness_delta", "brightness_set",
     "volume", "volume_delta", "rgb", "quit", "help", "status",
+    "scene",
 }
 _CHAT_FILLERS = {"uh", "um", "ah", "er", "mm", "hmm", "mhm"}
 
 
 def hardware_spoken_command(transcript: str) -> Optional[str]:
-    """Lights, volume, quit — poses go to the model."""
+    """Lights, brightness, study/reading, closer — not chat poses."""
     compact = _compact_speech(transcript)
     if not compact:
         return None
@@ -1292,7 +1421,7 @@ class CursorLampSession:
                         execute=_express,
                     ),
                     "set_mood": CustomTool(
-                        description="Change light only. mood: on, off, warm, cool, brighter, dimmer.",
+                        description="Desk light or scene. mood: on, off, warm, cool, white, yellow, study mode, reading mode, brighter, dimmer, closer.",
                         input_schema={
                             "type": "object",
                             "properties": {"mood": {"type": "string"}},
@@ -1789,6 +1918,51 @@ class LocalLamp:
         self.rgb.dispatch("solid", scaled)
         self._wait_hw(timeout=5.0)
 
+    def _present_action(self) -> Optional[Dict[str, float]]:
+        robot = getattr(self.motors, "robot", None) if self.motors is not None else None
+        bus = getattr(robot, "bus", None) if robot is not None else None
+        if bus is None:
+            return None
+        try:
+            present = bus.sync_read("Present_Position")
+        except Exception as exc:
+            print(f"pose read failed: {exc}")
+            return None
+        return {f"{name}.pos": float(val) for name, val in present.items()}
+
+    def _goto_named_pose(self, name: str, *, seconds: float = 1.1) -> None:
+        """Move to a desk pose. 'closer' nudges down toward the book."""
+        self.last_expression = name
+        start = None if self.sim else self._present_action()
+        if name == "closer":
+            target = _closer_pose(start)
+        else:
+            target = dict(POSES[name])
+            if start is not None:
+                target["base_yaw.pos"] = start.get("base_yaw.pos", target["base_yaw.pos"])
+        if self.sim or self.motors is None:
+            print(f"[sim] pose {name} {target}")
+            return
+        robot = getattr(self.motors, "robot", None)
+        send = getattr(robot, "send_action", None) if robot is not None else None
+        if not callable(send):
+            print("pose skipped: no send_action")
+            return
+        self._wait_hw()
+        origin = start or target
+        frames = max(8, int(seconds * 30))
+        try:
+            for step in range(1, frames + 1):
+                t = step / frames
+                action = {
+                    key: float(origin.get(key, value)) * (1.0 - t) + float(value) * t
+                    for key, value in target.items()
+                }
+                send(action)
+                time.sleep(1.0 / 30.0)
+        except Exception as exc:
+            print(f"pose failed: {exc}")
+
     def snap(self) -> Optional[Path]:
         self._play("scanning", wait=False)
         self._apply_rgb(EXPRESSION_RGB["scanning"])
@@ -1835,6 +2009,18 @@ class LocalLamp:
                 mood, bri = circadian_mood()
                 self.brightness = bri
             self._apply_rgb(MOOD_RGB[mood])
+            return cmd.reply
+        if cmd.kind == "scene":
+            payload = cmd.payload
+            assert isinstance(payload, dict)
+            if payload.get("brightness") is not None:
+                self.brightness = max(0, min(100, int(payload["brightness"])))
+            mood = payload.get("mood")
+            if mood:
+                self._apply_rgb(MOOD_RGB[str(mood)])
+            pose = payload.get("pose")
+            if pose:
+                self._goto_named_pose(str(pose))
             return cmd.reply
         if cmd.kind == "brightness_delta":
             self.brightness = max(0, min(100, self.brightness + int(cmd.payload)))

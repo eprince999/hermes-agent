@@ -50,7 +50,7 @@ Stage 1 (keyboard, no cloud): `sudo uv run python local_main.py`. Type `hello` /
 
 Stage 2 (ReSpeaker, English): `uv add vosk`, then `--download-vosk` (English small model) and `--listen`. Say **hello lamp** once; after Yeah?, say a keyword. Short commands (`lights off`, `nod`, `yeah`) skip the wake word. `--no-wake-word` opens the mic. Mapping without a mic: `--say "lights off"`.
 
-Stage 3 (Vosk + silent poses): put `CURSOR_API_KEY=crsr_...` in `~/lelamp_runtime/.env`, `uv add vosk cursor-sdk`, then `--download-vosk` and `--listen`. Vosk transcribes. The model only calls `express` / `set_mood` — it does not speak and does not use a personality prompt. Lights off / volume stay local. Camera stills are on-demand (`look` / `--snap`). Test with `--listen` or `--sim --no-cursor --say "nod"`. `--speak` is optional TTS for a test phrase only.
+Stage 3 (Vosk + silent poses): put `CURSOR_API_KEY=crsr_...` in `~/lelamp_runtime/.env`, `uv add vosk cursor-sdk`, then `--download-vosk` and `--listen`. Voice **desk commands run locally and skip the wake word**: `lights on` / `lights off`, `brighter` / `dimmer`, `study mode` (white), `reading mode` (yellow, lean to the book), `yellow light`, `white light`, `closer` / `look down`. The model only handles other talk as silent poses. Camera stills are on-demand (`look` / `--snap`). Test with `--sim --no-cursor --say "study mode"`. No TTS replies.
 
 The LiveKit + OpenAI Realtime path is optional later: copy `plugins/lelamp/runtime_main.py` over `~/lelamp_runtime/main.py`, put `OPENAI_API_KEY` in `.env`, then `sudo uv run main.py console`.
 
