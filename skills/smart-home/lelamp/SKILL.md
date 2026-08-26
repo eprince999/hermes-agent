@@ -44,7 +44,7 @@ LeLamp is a 5V lamp. Use the 5V 2A supplies from the assembly guide.
 
 If the lamp is already assembled, copy `plugins/lelamp/local_main.py` to `~/lelamp_runtime/local_main.py`.
 
-Keep the runnable name `local_main.py`. After a stage works, run `sudo uv run python local_main.py --snapshot` or copy into `lamp_snapshots/`. Do not invent `local_main_v2.py` as the launcher. Tracked archives: `plugins/lelamp/lamp_snapshots/stage3.py` (desk + coin-flip pose), `stage4.py` (music + beat dance). Copy a snapshot back over `local_main.py` to roll back.
+Keep the runnable name `local_main.py`. After a stage works, run `sudo uv run python local_main.py --snapshot` or copy into `lamp_snapshots/`. Do not invent `local_main_v2.py` as the launcher. Tracked archives: `plugins/lelamp/lamp_snapshots/stage2.py` (Chinese Vosk keywords), `stage3.py` (desk + coin-flip pose), `stage4.py` (music + beat dance, no model prompt). Copy a snapshot back over `local_main.py` to roll back.
 
 Stage 1 (keyboard, no cloud): `sudo uv run python local_main.py`. Type `hello` / `nod` / `warm` / `lights off`. `--sim` prints actions without servos.
 

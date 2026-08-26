@@ -394,8 +394,12 @@ def test_tracked_stage_snapshots_keep_dance_on_stage4():
         / "lelamp"
         / "lamp_snapshots"
     )
+    stage2 = (root / "stage2.py").read_text(encoding="utf-8")
     stage3 = (root / "stage3.py").read_text(encoding="utf-8")
     stage4 = (root / "stage4.py").read_text(encoding="utf-8")
+    assert "AGENT_STAGE = 2" in stage2
+    assert "keyboard + vosk listen" in stage2
+    assert "def play_music" not in stage2
     assert "AGENT_STAGE = 3" in stage3
     assert "def play_music" not in stage3
     assert "AGENT_STAGE = 4" in stage4
