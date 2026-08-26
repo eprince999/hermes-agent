@@ -209,8 +209,12 @@ def test_music_command_plays_from_folder(tmp_path, monkeypatch, capsys):
     printed = capsys.readouterr().out
     assert "bpm=" in printed
     assert lamp.last_rgb != (0, 0, 0)
+    assert lamp.mic_hold.is_set() is False
 
-    assert apply_speech(lamp, "今天天气") == "busy"
+    assert apply_speech(lamp, "今天天气") == "unknown"
+    assert apply_speech(lamp, "点头") == "busy"
+    assert apply_speech(lamp, "下一首") in {"music_next", "music"}
+    assert apply_speech(lamp, "大点声") == "volume_delta"
     assert apply_speech(lamp, "停止音乐") == "music_stop"
     assert lamp.music_playing is False
 

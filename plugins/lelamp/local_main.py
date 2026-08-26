@@ -1440,11 +1440,15 @@ def dispatch_text(lamp: LocalLamp, raw: str) -> str:
 
 
 def apply_speech(lamp: LocalLamp, transcript: str) -> str:
-    print(f"灯< {transcript}")
     compact = _compact_speech(transcript)
     phrase = extract_spoken_command(transcript)
     raw = phrase or compact or (transcript or "").strip()
     cmd = parse_line(raw)
+    # While a song plays the mic stays open, so lyrics become noise.
+    # Drop unknown fragments quietly; real commands still go through.
+    if lamp.music_playing and cmd.kind in {"unknown", "noop"}:
+        return "unknown"
+    print(f"灯< {transcript}")
     if lamp.music_playing and cmd.kind not in {
         "music_stop",
         "quit",
@@ -1480,7 +1484,7 @@ def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path)
     )
     worker.start()
     print("麦克风线程已开。请说：你好、点头、关灯、音乐、下一首、大点声。打字回车也可以。")
-    print("音乐：音乐 / 下一首 / 大点声 / 小点声 / 循环播放 / 单曲循环 / 停止音乐。")
+    print("放歌时麦克风继续听：停止音乐 / 下一首 / 大点声 / 小点声 / 循环播放 / 单曲循环。")
     try:
         while True:
             try:
@@ -1649,7 +1653,7 @@ class LocalLamp:
                 t0 = time.monotonic()
                 self.last_music = path.name
                 print(f"music {path.name} bpm={bpm}")
-                started = start_music_player(path, volume=self.music_volume)
+                started = self._start_player(path)
                 self._music_proc = started
                 if started is None:
                     break
@@ -1673,12 +1677,30 @@ class LocalLamp:
     def _hold_mic(self) -> None:
         self.mic_hold.set()
         time.sleep(0.4)
-        print("喇叭占用声卡")
+        print("麦克风暂停")
 
     def _release_mic(self) -> None:
         if self.mic_hold.is_set():
             self.mic_hold.clear()
-            print("喇叭还声卡")
+            print("麦克风继续听")
+
+    def _start_player(self, path: Path) -> Optional["subprocess.Popen[bytes]"]:
+        """Start playback without silencing the mic for the whole song.
+
+        ReSpeaker capture and playback are separate ALSA streams. Holding the
+        mic for the duration made 停止音乐 / 下一首 impossible to speak.
+        If the player cannot open while capture is live, pause the mic briefly,
+        start the player, then give the mic back.
+        """
+        proc = start_music_player(path, volume=self.music_volume)
+        if proc is not None:
+            return proc
+        self._hold_mic()
+        try:
+            proc = start_music_player(path, volume=self.music_volume)
+        finally:
+            self._release_mic()
+        return proc
 
     def _play_current_track(self) -> str:
         if not self._playlist:
@@ -1701,12 +1723,10 @@ class LocalLamp:
         self._paint_rgb(wash, quiet=self.sim)
         if self.sim:
             return f"music {path.name}"
-        self._hold_mic()
-        proc = start_music_player(path, volume=self.music_volume)
+        proc = self._start_player(path)
         self._music_proc = proc
         if proc is None:
             print_mpg123_install_hint()
-            self._release_mic()
         self._viz_thread = threading.Thread(
             target=self._viz_loop,
             args=(bpm, hue_shift),
