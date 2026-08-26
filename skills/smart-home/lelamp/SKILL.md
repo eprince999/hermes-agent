@@ -104,6 +104,7 @@ Official recordings: `wake_up`, `nod`, `headshake`, `curious`, `scanning`, `exci
 - One Raspberry Pi should run only this lamp's runtime while you talk to it.
 - Stage 2 speech uses offline Chinese Vosk (`vosk-model-small-cn-0.22`), not OpenAI and not the English model. Speak one short command and pause. Filler like `嗯` maps to nod.
 - Cloud Agents cannot move Pi GPIO. Drop songs into `~/lelamp_runtime/music/` on the Pi itself.
+- MP3 needs `mpg123` or `ffmpeg` on the Pi (`sudo apt install -y mpg123 ffmpeg`). `aplay` only plays wav. Music playback flashes the head; it does not replay `nod` recordings, which would fight the servo serial port.
 
 ## Verification
 

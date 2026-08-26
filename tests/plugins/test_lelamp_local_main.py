@@ -222,3 +222,36 @@ def test_music_folder_plays_user_files_not_builtins(tmp_path, monkeypatch):
     assert fallback.parent.name == ".builtin"
     assert list_music_files(empty) == []
     assert _BUILTIN_TRACKS
+
+
+def test_mp3_player_commands_include_mpg123_and_ffmpeg(monkeypatch):
+    from plugins.lelamp import local_main
+
+    def fake_bin(name: str):
+        known = {
+            "aplay": "/usr/bin/aplay",
+            "mpg123": "/usr/bin/mpg123",
+            "ffmpeg": "/usr/bin/ffmpeg",
+        }
+        return known.get(name)
+
+    monkeypatch.setattr(local_main, "_bin", fake_bin)
+    commands = local_main.music_player_commands(Path("rain.mp3"), device="plughw:1,0")
+    joined = [" ".join(cmd) for cmd in commands]
+    assert any(line.startswith("/usr/bin/mpg123") for line in joined)
+    assert any(line.startswith("/usr/bin/ffmpeg") for line in joined)
+    assert not any(line.startswith("/usr/bin/aplay") for line in joined)
+
+
+def test_music_rgb_pulse_does_not_play_recordings():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    lamp.last_expression = "wake_up"
+    lamp._dance_step(2)
+    assert lamp.last_expression == "wake_up"
+    assert lamp.last_rgb != (0, 0, 0)

@@ -34,6 +34,7 @@ import queue
 import random
 import select
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -192,27 +193,16 @@ MUSIC_STOP = {
     "停止音乐", "别放了", "关掉音乐",
     "stop music", "stopmusic", "stop dancing",
 }
-DANCE_RECORDINGS = ("happy_wiggle", "nod", "excited")
 _BUILTIN_TRACKS = (
     ("pulse_100.wav", 100, (0, 3, 7, 10)),
     ("bounce_120.wav", 120, (0, 4, 7, 12)),
     ("spark_140.wav", 140, (0, 5, 7, 9)),
 )
-_DANCE_HOME = {
-    "base_yaw.pos": 0.0,
-    "wrist_pitch.pos": 22.0,
-    "wrist_roll.pos": 0.0,
-}
-_DANCE_LIMITS = {
-    "base_yaw.pos": (-90.0, 90.0),
-    "wrist_roll.pos": (-45.0, 45.0),
-    "wrist_pitch.pos": (-20.0, 50.0),
-}
 
 HELP_TEXT = """本地台灯 Stage 2（无 OpenAI）
 动作：你好 / 点头 / 摇头 / 好奇 / 张望 / 开心 / 兴奋 / 惊讶 / 害羞 / 难过 / 待机
 灯光：开灯 / 关灯 / 暖光 / 冷光 / 自动 / 亮一点 / 暗一点
-音乐：音乐 / 放音乐 / 跳舞（随机播放 music/ 文件夹）  停止音乐
+音乐：音乐 / 放音乐（随机播放 music/ 文件夹）  停止音乐
 说话：启动时加 --listen（先 --download-vosk）
 其它：status  rgb 255 176 80  help  q
 """
@@ -425,14 +415,6 @@ def _bin(name: str) -> Optional[str]:
     return None
 
 
-def _clamp_dance(pose: Dict[str, float]) -> Dict[str, float]:
-    out = dict(pose)
-    for key, (lo, hi) in _DANCE_LIMITS.items():
-        if key in out:
-            out[key] = max(lo, min(hi, float(out[key])))
-    return out
-
-
 def music_dir() -> Path:
     override = (os.environ.get("LELAMP_MUSIC_DIR") or "").strip()
     if override:
@@ -539,31 +521,232 @@ def pick_random_track(folder: Optional[Path] = None) -> Tuple[Path, int]:
     return path, bpm_from_name(path) or 120
 
 
-def start_music_player(path: Path) -> Optional["subprocess.Popen[bytes]"]:
-    suffix = path.suffix.lower()
-    candidates: List[Tuple[str, List[str]]] = []
-    if suffix == ".wav":
-        candidates.append(("aplay", ["-q"]))
-        candidates.append(("paplay", []))
-    candidates.extend(
-        (
-            ("ffplay", ["-nodisp", "-autoexit", "-loglevel", "quiet"]),
-            ("mpv", ["--no-video", "--really-quiet"]),
-            ("mpg123", ["-q"]),
+def find_alsa_playback_device() -> Optional[str]:
+    """Prefer the ReSpeaker/seeed speaker over HDMI."""
+    aplay = _bin("aplay")
+    if not aplay:
+        return None
+    try:
+        listing = subprocess.check_output(
+            [aplay, "-l"],
+            text=True,
+            stderr=subprocess.STDOUT,
+            timeout=3,
         )
-    )
-    for name, extra in candidates:
-        binary = _bin(name)
-        if not binary:
+    except Exception:
+        return None
+    for line in listing.splitlines():
+        low = line.lower()
+        if not low.startswith("card "):
+            continue
+        if not any(tag in low for tag in ("seeed", "respeaker", "voicecard", "array")):
             continue
         try:
-            return subprocess.Popen(
-                [binary, *extra, str(path)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except OSError:
+            card = int(line.split(":", 1)[0].split()[1])
+        except (IndexError, ValueError):
             continue
+        return f"plughw:{card},0"
+    return None
+
+
+def _player_env(device: Optional[str]) -> Dict[str, str]:
+    env = os.environ.copy()
+    if device:
+        env["AUDIODEV"] = device
+        env.setdefault("SDL_AUDIODRIVER", "alsa")
+    return env
+
+
+def music_player_commands(path: Path, *, device: Optional[str] = None) -> List[List[str]]:
+    """Build argv lists for common Pi players. aplay alone cannot decode mp3."""
+    path_s = str(path)
+    suffix = path.suffix.lower()
+    commands: List[List[str]] = []
+
+    def add(binary: Optional[str], args: Sequence[str]) -> None:
+        if binary:
+            commands.append([binary, *args])
+
+    aplay = _bin("aplay")
+    ffmpeg = _bin("ffmpeg")
+    if suffix == ".wav":
+        if aplay:
+            wav = ["-q"]
+            if device:
+                wav.extend(["-D", device])
+            wav.append(path_s)
+            add(aplay, wav)
+        add(_bin("paplay"), [path_s])
+
+    mpg = _bin("mpg123") or _bin("mpg321")
+    if suffix in {".mp3", ".mp2"} and mpg:
+        mpg_args = ["-q"]
+        if device:
+            mpg_args.extend(["-a", device])
+        mpg_args.append(path_s)
+        add(mpg, mpg_args)
+
+    ffplay = _bin("ffplay")
+    if ffplay:
+        add(ffplay, ["-nodisp", "-autoexit", "-loglevel", "quiet", path_s])
+
+    mpv = _bin("mpv")
+    if mpv:
+        add(mpv, ["--no-video", "--really-quiet", path_s])
+
+    gst = _bin("gst-play-1.0")
+    if gst:
+        add(gst, ["--no-interactive", path_s])
+
+    cvlc = _bin("cvlc") or _bin("vlc")
+    if cvlc:
+        add(cvlc, ["--play-and-exit", "--intf", "dummy", "--quiet", path_s])
+
+    if ffmpeg:
+        alsa_out = device or "default"
+        add(
+            ffmpeg,
+            [
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                path_s,
+                "-f",
+                "alsa",
+                alsa_out,
+            ],
+        )
+    return commands
+
+
+def _spawn_player(argv: Sequence[str], *, env: Dict[str, str]) -> Optional["subprocess.Popen[bytes]"]:
+    try:
+        proc = subprocess.Popen(
+            list(argv),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+    except OSError:
+        return None
+    time.sleep(0.2)
+    if proc.poll() is not None:
+        return None
+    return proc
+
+
+def _spawn_ffmpeg_aplay(path: Path, *, device: Optional[str], env: Dict[str, str]) -> Optional["subprocess.Popen[bytes]"]:
+    ffmpeg = _bin("ffmpeg")
+    aplay = _bin("aplay")
+    if not ffmpeg or not aplay:
+        return None
+    aplay_cmd = [aplay, "-q"]
+    if device:
+        aplay_cmd.extend(["-D", device])
+    try:
+        decode = subprocess.Popen(
+            [
+                ffmpeg,
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(path),
+                "-f",
+                "wav",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "44100",
+                "-ac",
+                "2",
+                "-",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+        play = subprocess.Popen(
+            aplay_cmd,
+            stdin=decode.stdout,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
+    except OSError:
+        return None
+    if decode.stdout is not None:
+        decode.stdout.close()
+    play._lelamp_buddy = decode  # type: ignore[attr-defined]
+    time.sleep(0.25)
+    if play.poll() is not None:
+        _stop_process(decode)
+        return None
+    return play
+
+
+def _spawn_pygame_player(path: Path, *, env: Dict[str, str]) -> Optional["subprocess.Popen[bytes]"]:
+    script = (
+        "import sys, time\n"
+        "path = sys.argv[1]\n"
+        "import pygame\n"
+        "pygame.mixer.init()\n"
+        "pygame.mixer.music.load(path)\n"
+        "pygame.mixer.music.play()\n"
+        "while pygame.mixer.music.get_busy():\n"
+        "    time.sleep(0.15)\n"
+    )
+    return _spawn_player([sys.executable, "-c", script, str(path)], env=env)
+
+
+def _stop_process(proc: Optional["subprocess.Popen[bytes]"]) -> None:
+    if proc is None:
+        return
+    buddy = getattr(proc, "_lelamp_buddy", None)
+    if proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        try:
+            proc.wait(timeout=2)
+        except Exception:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+    if buddy is not None:
+        _stop_process(buddy)
+
+
+def start_music_player(path: Path) -> Optional["subprocess.Popen[bytes]"]:
+    device = find_alsa_playback_device()
+    env = _player_env(device)
+    for argv in music_player_commands(path, device=device):
+        proc = _spawn_player(argv, env=env)
+        if proc is not None:
+            print(f"player {' '.join(argv[:1])}")
+            return proc
+    piped = _spawn_ffmpeg_aplay(path, device=device, env=env)
+    if piped is not None:
+        print("player ffmpeg|aplay")
+        return piped
+    pygame_proc = _spawn_pygame_player(path, env=env)
+    if pygame_proc is not None:
+        print("player pygame")
+        return pygame_proc
     return None
 
 
@@ -819,18 +1002,6 @@ class LocalLamp:
     def music_playing(self) -> bool:
         return bool(self._music_playing)
 
-    def _present_action(self) -> Optional[Dict[str, float]]:
-        robot = getattr(self.motors, "robot", None) if self.motors is not None else None
-        bus = getattr(robot, "bus", None) if robot is not None else None
-        if bus is None:
-            return None
-        try:
-            present = bus.sync_read("Present_Position")
-        except Exception as exc:
-            print(f"姿态读取失败: {exc}")
-            return None
-        return {f"{name}.pos": float(val) for name, val in present.items()}
-
     def _flash_rgb(self, rgb: Tuple[int, int, int]) -> None:
         scaled = _scale_rgb(rgb, self.brightness)
         self.last_rgb = scaled
@@ -839,34 +1010,13 @@ class LocalLamp:
             return
         self.rgb.dispatch("solid", scaled)
 
-    def _dance_home(self) -> Dict[str, float]:
-        present = None if self.sim else self._present_action()
-        home = dict(present) if present else dict(_DANCE_HOME)
-        home.setdefault("base_yaw.pos", 0.0)
-        home.setdefault("wrist_pitch.pos", 22.0)
-        home.setdefault("wrist_roll.pos", 0.0)
-        return home
-
-    def _dance_step(self, beat: int, home: Dict[str, float]) -> None:
-        sign = 1 if beat % 2 == 0 else -1
-        self._flash_rgb(MOOD_RGB["happy"] if sign > 0 else MOOD_RGB["talk"])
-        robot = getattr(self.motors, "robot", None) if self.motors is not None else None
-        send = getattr(robot, "send_action", None) if robot is not None else None
-        if callable(send):
-            action = dict(home)
-            action["base_yaw.pos"] = float(home.get("base_yaw.pos", 0.0)) + 12.0 * sign
-            action["wrist_pitch.pos"] = float(home.get("wrist_pitch.pos", 22.0)) + 9.0 * sign
-            action["wrist_roll.pos"] = float(home.get("wrist_roll.pos", 0.0)) - 7.0 * sign
-            try:
-                send(_clamp_dance(action))
-            except Exception as exc:
-                print(f"跳舞失败: {exc}")
-        if beat % 2 == 0:
-            self._play(DANCE_RECORDINGS[beat % len(DANCE_RECORDINGS)], wait=False)
+    def _dance_step(self, beat: int) -> None:
+        # RGB only. Playing official recordings here races MotorsService
+        # on /dev/ttyACM0 ("Port is in use").
+        self._flash_rgb(MOOD_RGB["happy"] if beat % 2 == 0 else MOOD_RGB["talk"])
 
     def _dance_loop(self, bpm: int) -> None:
         period = 60.0 / max(40, min(220, int(bpm)))
-        home = self._dance_home()
         beat = 0
         next_beat = time.monotonic()
         while not self._music_stop.is_set():
@@ -874,7 +1024,7 @@ class LocalLamp:
             if now < next_beat:
                 time.sleep(min(0.03, next_beat - now))
                 continue
-            self._dance_step(beat, home)
+            self._dance_step(beat)
             beat += 1
             next_beat += period
             proc = self._music_proc
@@ -896,12 +1046,13 @@ class LocalLamp:
         self._music_stop.clear()
         self._music_playing = True
         if self.sim:
-            self._dance_step(0, self._dance_home())
+            self._dance_step(0)
             return f"music {path.name}"
         proc = start_music_player(path)
         self._music_proc = proc
         if proc is None:
-            print("没有播放器（需要 aplay 或 ffplay）")
+            print("没有播放器。mp3 需要 mpg123 或 ffmpeg。在 Pi 上执行：")
+            print("  sudo apt install -y mpg123 ffmpeg")
         self._dance_thread = threading.Thread(
             target=self._dance_loop,
             args=(bpm,),
@@ -915,15 +1066,7 @@ class LocalLamp:
         self._music_stop.set()
         proc = self._music_proc
         self._music_proc = None
-        if proc is not None and proc.poll() is None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=2)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+        _stop_process(proc)
         thread = self._dance_thread
         self._dance_thread = None
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
