@@ -142,8 +142,8 @@ apps/desktop/demo/
 plugins/lelamp/lamp_snapshots/*
 !plugins/lelamp/lamp_snapshots/stage*.py
 
-# LeLamp generated beat loops (written next to local_main.py on the Pi)
-plugins/lelamp/music/
+# User drop-in tracks live in music/; generated fallback beats go in music/.builtin/
+plugins/lelamp/music/**
 
 # LeLamp downloaded speech models (fetch on the Pi with --download-vosk / --download-piper)
 plugins/lelamp/models/*.onnx

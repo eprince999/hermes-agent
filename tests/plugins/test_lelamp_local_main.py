@@ -13,14 +13,17 @@ from plugins.lelamp.local_main import (
     cursor_api_key,
     direct_spoken_command,
     ensure_builtin_music,
+    ensure_music_dir,
     execute_lamp_tool,
     extract_spoken_command,
     hardware_spoken_command,
     join_speech,
+    list_music_files,
     looks_complete_utterance,
     looks_like_look,
     parse_line,
     pick_asr,
+    pick_random_track,
     resolve_feeling,
     should_pose_from_chat,
     speak_text,
@@ -1021,6 +1024,7 @@ def test_music_command_is_local_hardware(tmp_path, monkeypatch, capsys):
     assert parse_line("stop music").kind == "music_stop"
     assert parse_line("turn off the music").kind == "music_stop"
     assert parse_line("放音乐").kind == "music"
+    assert parse_line("音乐").kind == "music"
     assert hardware_spoken_command("music") == "music"
     assert hardware_spoken_command("please play music") == "play music"
     assert hardware_spoken_command("stop music") == "stop music"
@@ -1063,3 +1067,24 @@ def test_music_command_is_local_hardware(tmp_path, monkeypatch, capsys):
     assert apply_speech(lamp, "stop music", Brain()) == "music_stop"
     assert lamp.music_playing is False
     assert seen == []
+
+
+def test_music_folder_plays_user_files_not_builtins(tmp_path, monkeypatch):
+    monkeypatch.setenv("LELAMP_MUSIC_DIR", str(tmp_path))
+    folder = ensure_music_dir()
+    assert folder == tmp_path
+    assert folder.is_dir()
+    song = tmp_path / "desk_tune_96.wav"
+    write_beat_wav(song, bpm=96, notes=(0, 4, 7), seconds=0.3)
+    ensure_builtin_music(tmp_path / ".builtin")
+    files = list_music_files(tmp_path)
+    assert files == [song]
+    path, bpm = pick_random_track()
+    assert path == song
+    assert bpm == 96
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    fallback, _bpm = pick_random_track(empty)
+    assert fallback.parent.name == ".builtin"
+    assert list_music_files(empty) == []

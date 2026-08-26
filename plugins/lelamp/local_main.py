@@ -15,7 +15,8 @@ Keep official ``main.py`` untouched. From the runtime repo root:
     sudo uv run python local_main.py --snapshot
 
 Stage 4: Vosk hears English. Desk commands (lights, brightness, study/reading,
-closer, music) run locally. No model prompt. No spoken replies.
+closer, music) run locally. Say music / 音乐 to play a random file from the
+music folder next to this script. No model prompt. No spoken replies.
 
 Roadmap:
   1. keyboard + motors + RGB
@@ -314,8 +315,8 @@ HELP_TEXT = """Stage 4 lamp (voice control, silent)
 Light: lights on / off   brighter / dimmer   white / yellow
 Modes: study mode (white)   reading mode (yellow, lean to the book)
 Pose: closer / look down / lean down
-Music: music / dance / play music / stop music
-Chat: sometimes a recording (nod, shake, curious, …)
+Music: music / 音乐  (random file in the music folder)   stop music
+Put wav/mp3/ogg in that folder.
 Camera: look / snap
 Other: status  help  q
 No spoken replies.
@@ -534,7 +535,7 @@ def extract_spoken_command(transcript: str) -> Optional[str]:
 MUSIC_START = {
     "music", "play music", "play some music", "start music",
     "dance", "dance please", "play a song", "put on music",
-    "音乐", "放音乐", "跳舞",
+    "音乐", "放音乐", "播放音乐", "来点音乐", "跳舞", "放歌",
 }
 MUSIC_STOP = {
     "stop music", "stop dancing", "enough music", "no music",
@@ -1154,8 +1155,15 @@ def _play_wav(path: str) -> bool:
 def music_dir() -> Path:
     override = (os.environ.get("LELAMP_MUSIC_DIR") or "").strip()
     if override:
-        return Path(override)
+        return Path(override).expanduser()
     return Path(__file__).resolve().parent / "music"
+
+
+def ensure_music_dir(folder: Optional[Path] = None) -> Path:
+    """Create the drop-in music folder if it is missing."""
+    root = folder or music_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def write_beat_wav(
@@ -1217,10 +1225,16 @@ def list_music_files(folder: Optional[Path] = None) -> List[Path]:
     if not root.is_dir():
         return []
     allowed = {".wav", ".mp3", ".ogg", ".flac", ".m4a"}
-    return sorted(
-        path for path in root.iterdir()
-        if path.is_file() and path.suffix.lower() in allowed
-    )
+    files: List[Path] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(root)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        if path.suffix.lower() in allowed:
+            files.append(path)
+    return sorted(files)
 
 
 def bpm_from_name(path: Path) -> Optional[int]:
@@ -1235,9 +1249,11 @@ def bpm_from_name(path: Path) -> Optional[int]:
 
 
 def pick_random_track(folder: Optional[Path] = None) -> Tuple[Path, int]:
-    root = folder or music_dir()
-    ensure_builtin_music(root)
+    root = ensure_music_dir(folder)
     files = list_music_files(root)
+    if not files:
+        files = ensure_builtin_music(root / ".builtin")
+        print(f"music folder empty; drop wav/mp3 in {root}")
     if not files:
         raise RuntimeError(f"no music files in {root}")
     path = random.choice(files)
@@ -1970,6 +1986,8 @@ class LocalLamp:
         self._music_playing = False
 
     def start(self) -> None:
+        folder = ensure_music_dir()
+        print(f"music folder {folder}")
         if self.sim:
             print("[sim] skip motors/rgb connect")
             return
@@ -2154,7 +2172,11 @@ class LocalLamp:
 
     def play_music(self) -> str:
         self.stop_music()
-        path, bpm = pick_random_track()
+        try:
+            path, bpm = pick_random_track()
+        except RuntimeError as exc:
+            print(str(exc))
+            return "no music"
         self.last_music = path.name
         self.last_expression = "happy_wiggle"
         self._apply_rgb(MOOD_RGB["happy"])
