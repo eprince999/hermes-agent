@@ -21,6 +21,7 @@ from plugins.lelamp.local_main import (
     parse_line,
     pick_asr,
     resolve_feeling,
+    should_pose_from_chat,
     speak_text,
     speech_lang,
     split_wake,
@@ -244,7 +245,7 @@ def test_long_speech_goes_to_model_not_keyword_snip():
             seen.append(text)
             return "ok"
 
-    result = apply_speech(lamp, "Do you agree warm light is nicer", Brain())
+    result = apply_speech(lamp, "Do you agree warm light is nicer", Brain(), pose_chance=1.0)
     assert result == "chat"
     assert seen == ["Do you agree warm light is nicer"]
     assert lamp.last_expression != "nod"
@@ -284,9 +285,9 @@ def test_spoken_chat_goes_to_model_for_a_pose():
             seen.append(text)
             return "I would talk but the lamp stays silent."
 
-    assert apply_speech(lamp, "nod", Brain()) == "chat"
-    assert apply_speech(lamp, "how are you", Brain()) == "chat"
-    assert apply_speech(lamp, "yeah I like the warm light", Brain()) == "chat"
+    assert apply_speech(lamp, "nod", Brain(), pose_chance=1.0) == "chat"
+    assert apply_speech(lamp, "how are you", Brain(), pose_chance=1.0) == "chat"
+    assert apply_speech(lamp, "yeah I like the warm light", Brain(), pose_chance=1.0) == "chat"
     assert seen == ["nod", "how are you", "yeah I like the warm light"]
     assert lamp.last_spoken == ""
 
@@ -427,6 +428,51 @@ def test_execute_lamp_tool_moves_and_lights():
     assert lamp.last_rgb == (0, 0, 0)
 
 
+def test_express_tool_only_plays_official_recordings():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    assert "ok curious" in execute_lamp_tool(lamp, "express", {"feeling": "curious"})
+    assert lamp.last_expression == "curious"
+    lamp.last_expression = "nod"
+    out = execute_lamp_tool(lamp, "express", {"feeling": "closer"})
+    assert "unknown pose" in out
+    assert lamp.last_expression == "nod"
+    out = execute_lamp_tool(lamp, "express", {"feeling": "study mode"})
+    assert "unknown pose" in out
+
+
+def test_chat_pose_coin_flip_skips_the_model():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    seen = []
+
+    class Brain:
+        def ask(self, text):
+            seen.append(text)
+            return ""
+
+    assert apply_speech(lamp, "how are you", Brain(), pose_chance=0.0) == "skip"
+    assert seen == []
+    assert apply_speech(lamp, "how are you", Brain(), pose_chance=1.0) == "chat"
+    assert seen == ["how are you"]
+
+
+def test_should_pose_from_chat_uses_chance():
+    assert should_pose_from_chat(chance=1.0, rng=lambda: 0.99) is True
+    assert should_pose_from_chat(chance=0.2, rng=lambda: 0.9) is False
+    assert should_pose_from_chat(chance=0.0, rng=lambda: 0.0) is False
+
+
 def test_cursor_api_key_missing_is_explicit(monkeypatch):
     from plugins.lelamp import local_main
 
@@ -526,7 +572,7 @@ def test_main_sim_speak_without_cursor(capsys):
     out = capsys.readouterr().out
     assert "stage 3" in out
     assert "[sim] speak Hey. I'm here with you." in out
-    assert "the model picks a pose" in out or "local poses" in out
+    assert "desk commands" in out
 
 
 def test_main_no_cursor_keeps_keywords_silent(monkeypatch, capsys):
@@ -915,7 +961,7 @@ def test_what_do_you_see_goes_to_model():
 
     assert parse_line("what do you see").kind == "snap"
     assert parse_line("look").kind == "snap"
-    assert apply_speech(lamp, "what do you see", Brain()) == "chat"
+    assert apply_speech(lamp, "what do you see", Brain(), pose_chance=1.0) == "chat"
     assert seen == ["what do you see"]
     assert lamp.last_spoken == ""
 

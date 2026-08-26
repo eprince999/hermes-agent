@@ -15,7 +15,8 @@ Keep official ``main.py`` untouched. From the runtime repo root:
     sudo uv run python local_main.py --snapshot
 
 Stage 3: Vosk hears English. Desk commands (lights, brightness, study/reading,
-closer) run locally. Cursor only maps leftover talk to a pose. No spoken replies.
+closer) run locally. Other talk is sent to Cursor with a coin-flip; if it
+fires, it may play one official recording. No spoken replies.
 
 Roadmap:
   1. keyboard + motors + RGB
@@ -30,6 +31,7 @@ import inspect
 import json
 import os
 import queue
+import random
 import select
 import shutil
 import subprocess
@@ -46,7 +48,10 @@ from urllib.request import Request, urlopen, urlretrieve
 
 # Bump when a stage lands. Printed at startup so a snapshot is identifiable.
 AGENT_STAGE = 3
-AGENT_LABEL = "keyboard + vosk(en) + silent-pose"
+AGENT_LABEL = "keyboard + vosk(en) + desk + coin-flip pose"
+
+# Chance that leftover talk is sent to Cursor for an official recording.
+POSE_CHANCE = 0.5
 
 
 def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = None) -> Path:
@@ -309,6 +314,7 @@ HELP_TEXT = """Stage 3 lamp (voice control, silent)
 Light: lights on / off   brighter / dimmer   white / yellow
 Modes: study mode (white)   reading mode (yellow, lean to the book)
 Pose: closer / look down / lean down
+Chat: sometimes a recording (nod, shake, curious, …)
 Camera: look / snap
 Other: status  help  q
 No spoken replies.
@@ -729,23 +735,35 @@ def resolve_feeling(name: str) -> str:
     """Map express() feeling, including agree/disagree, onto a recording."""
     raw = (name or "").strip()
     try:
-        return resolve_expression(raw)
+        rec = resolve_expression(raw)
     except ValueError:
-        pass
-    compact = _compact_speech(raw)
-    key = compact.lower()
-    if compact in AGREE_FEELINGS or key in AGREE_FEELINGS:
-        return "nod"
-    if compact in DISAGREE_FEELINGS or key in DISAGREE_FEELINGS:
-        return "headshake"
-    cmd = parse_line(raw)
-    if cmd.kind == "express":
-        return str(cmd.payload)
+        rec = ""
+        compact = _compact_speech(raw)
+        key = compact.lower()
+        if compact in AGREE_FEELINGS or key in AGREE_FEELINGS:
+            rec = "nod"
+        elif compact in DISAGREE_FEELINGS or key in DISAGREE_FEELINGS:
+            rec = "headshake"
+        else:
+            cmd = parse_line(raw)
+            if cmd.kind == "express":
+                rec = str(cmd.payload)
+    if rec in RECORDINGS:
+        return rec
     raise ValueError(raw)
 
 
+def should_pose_from_chat(*, chance: float = POSE_CHANCE, rng=None) -> bool:
+    """Coin-flip: leftover talk is sent to Cursor this often."""
+    roll = random.random() if rng is None else float(rng())
+    return roll < max(0.0, min(1.0, float(chance)))
+
+
 CURSOR_LAMP_INSTRUCTIONS = """Silent lamp. Do not speak. Do not write a reply.
-Call express for every utterance. Optionally set_mood for light.
+Do not change lights. Desk modes are handled locally.
+If you react, call express with ONE official recording:
+nod, headshake, curious, scanning, excited, happy_wiggle, shock, shy, sad, idle, wake_up.
+If the feeling is unclear, do nothing.
 """
 
 
@@ -1245,10 +1263,7 @@ def execute_lamp_tool(lamp: "LocalLamp", name: str, args: Optional[dict] = None)
         try:
             rec = resolve_feeling(feeling)
         except ValueError:
-            cmd = parse_line(feeling)
-            if cmd.kind == "unknown":
-                return cmd.reply
-            return lamp.apply(cmd, wait_motion=False) or f"ok {cmd.kind}"
+            return "unknown pose. use: " + ", ".join(RECORDINGS)
         return lamp.apply(Command("express", rec, ""), wait_motion=False) or f"ok {rec}"
     if name == "set_mood":
         cmd = parse_line(str(payload.get("mood") or ""))
@@ -1407,13 +1422,17 @@ class CursorLampSession:
                 cwd=str(self._workspace),
                 custom_tools={
                     "express": CustomTool(
-                        description="Play a body pose from meaning. feeling: nod, shake, hello, happy, sad, curious, wow, shy, idle, scanning. Never speak.",
+                        description=(
+                            "Play one official recording. feeling must be one of: "
+                            + ", ".join(RECORDINGS)
+                            + ". Skip if unsure. Never speak."
+                        ),
                         input_schema={
                             "type": "object",
                             "properties": {
                                 "feeling": {
                                     "type": "string",
-                                    "description": "nod, shake, hello, happy, sad, curious, wow, shy, idle, scanning, agree, disagree",
+                                    "description": ", ".join(RECORDINGS) + ", agree, disagree",
                                 },
                             },
                             "required": ["feeling"],
@@ -1640,6 +1659,9 @@ def dispatch_text(lamp: LocalLamp, raw: str, brain: Optional[CursorLampSession] 
         return "snap"
     if cmd.kind == "unknown":
         if brain is not None:
+            if not should_pose_from_chat():
+                print("still")
+                return "skip"
             brain.ask(raw)
             return "chat"
         utter(lamp, cmd.reply)
@@ -1654,6 +1676,8 @@ def apply_speech(
     brain: Optional[CursorLampSession] = None,
     *,
     listen_mode: bool = False,
+    pose_chance: Optional[float] = None,
+    rng=None,
 ) -> str:
     print(f"lamp< {transcript}")
     compact = _compact_speech(transcript)
@@ -1667,6 +1691,10 @@ def apply_speech(
             if hardware != compact:
                 print(f"heard as: {hardware}")
             return dispatch_text(lamp, hardware, None)
+        chance = POSE_CHANCE if pose_chance is None else pose_chance
+        if not should_pose_from_chat(chance=chance, rng=rng):
+            print("still")
+            return "skip"
         brain.ask(transcript)
         return "chat"
     phrase = direct_spoken_command(transcript)
@@ -1706,8 +1734,8 @@ def run_listen_loop(
     catcher = SpeechCatcher(hold_s=hold_s)
     awake_until = 0.0
     if wake_word:
-        print("Mic on. Say hello lamp once, then talk. I will pose, not speak.")
-        print("lights off / volume still run locally. Typing still works.")
+        print("Mic on. Say hello lamp once, then talk. I may pose from recordings.")
+        print("Desk commands (lights / study / reading / closer) skip the wake word.")
     else:
         print("Mic on (no wake word). I pose from what you mean. No voice reply.")
     try:
@@ -2130,9 +2158,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not args.no_cursor and os.environ.get("CURSOR_API_KEY"):
         brain = CursorLampSession(lamp)
     if brain is not None:
-        print("talk: Vosk hears you; the model picks a pose. No voice reply.")
+        print("talk: desk commands are local. Other talk: coin-flip official pose. No voice.")
     else:
-        print("talk: local poses. Put CURSOR_API_KEY=crsr_... in .env to understand full sentences.")
+        print("talk: local desk commands. Put CURSOR_API_KEY=crsr_... in .env for chat poses.")
     if speak_enabled:
         print(describe_tts())
     voice_warm = None
