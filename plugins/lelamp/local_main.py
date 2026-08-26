@@ -17,7 +17,9 @@ Keep official ``main.py`` untouched. From the runtime repo root:
     sudo uv run python local_main.py --snapshot
 
 Type Chinese commands, or with ``--listen`` speak them to the ReSpeaker.
-Say 音乐 to play a random file from the music/ folder. ``q`` or Ctrl+C quits.
+Say 音乐 to play a random file from the music/ folder. Say 下一首 to skip.
+While a song plays, the RGB ring does a soft music-box wash (warm highs,
+cool lows) and the motors stay still. ``q`` or Ctrl+C quits.
 Music plays on the lamp ReSpeaker speaker by default (never HDMI).
 Optional ``--audio bt`` uses a paired Bluetooth speaker instead.
 Install the mp3 CLI with ``sudo apt update && sudo apt install -y mpg123``
@@ -190,12 +192,16 @@ LIGHT_ONLY: Dict[str, str] = {
 
 MUSIC_START = {
     "音乐", "放音乐", "播放音乐", "来点音乐", "听音乐", "放首歌", "来一首",
-    "跳舞", "放歌",
-    "music", "play music", "playmusic", "dance",
+    "放歌",
+    "music", "play music", "playmusic",
 }
 MUSIC_STOP = {
-    "停止音乐", "别放了", "关掉音乐",
-    "stop music", "stopmusic", "stop dancing",
+    "停止音乐", "别放了", "关掉音乐", "暂停音乐",
+    "stop music", "stopmusic",
+}
+MUSIC_NEXT = {
+    "下一首", "换一首", "下一曲", "切歌", "换歌", "下一首歌", "换首歌",
+    "next", "next song", "skip",
 }
 _BUILTIN_TRACKS = (
     ("pulse_100.wav", 100, (0, 3, 7, 10)),
@@ -206,7 +212,7 @@ _BUILTIN_TRACKS = (
 HELP_TEXT = """本地台灯 Stage 2（无 OpenAI）
 动作：你好 / 点头 / 摇头 / 好奇 / 张望 / 开心 / 兴奋 / 惊讶 / 害羞 / 难过 / 待机
 灯光：开灯 / 关灯 / 暖光 / 冷光 / 自动 / 亮一点 / 暗一点
-音乐：音乐 / 放音乐（随机播放 music/ 文件夹）  停止音乐
+音乐：音乐 / 放音乐（随机播放 music/ 文件夹）  下一首  停止音乐
 说话：启动时加 --listen（先 --download-vosk）
 其它：status  rgb 255 176 80  help  q
 """
@@ -256,6 +262,46 @@ def _scale_rgb(rgb: Tuple[int, int, int], brightness: int) -> Tuple[int, int, in
     )
 
 
+def lerp_rgb(
+    start: Tuple[int, int, int],
+    end: Tuple[int, int, int],
+    t: float,
+) -> Tuple[int, int, int]:
+    t = max(0.0, min(1.0, float(t)))
+    return (
+        int(start[0] + (end[0] - start[0]) * t),
+        int(start[1] + (end[1] - start[1]) * t),
+        int(start[2] + (end[2] - start[2]) * t),
+    )
+
+
+_VIZ_WARM = (255, 186, 92)
+_VIZ_WARM_HI = (255, 220, 160)
+_VIZ_COOL = (118, 168, 255)
+_VIZ_COOL_LO = (70, 92, 196)
+
+
+def music_viz_color(*, t: float, bpm: int, hue_shift: float) -> Tuple[int, int, int]:
+    """Soft music-box wash: downbeat/bass leans cool, in-between highs lean warm."""
+    import math
+
+    beat = max(40, min(220, int(bpm)))
+    phase = (max(0.0, float(t)) * beat / 60.0) % 1.0
+    bass = 0.5 + 0.5 * math.cos(2.0 * math.pi * phase)
+    treble = 1.0 - bass
+    wander = 0.5 + 0.5 * math.sin(2.0 * math.pi * (max(0.0, float(t)) / 8.0 + float(hue_shift)))
+    cool = lerp_rgb(_VIZ_COOL, _VIZ_COOL_LO, wander)
+    warm = lerp_rgb(_VIZ_WARM, _VIZ_WARM_HI, 1.0 - wander)
+    mix = 0.16 + 0.84 * (0.74 * treble + 0.26 * wander)
+    rgb = lerp_rgb(cool, warm, mix)
+    pulse = 0.80 + 0.20 * (0.5 + 0.5 * math.cos(2.0 * math.pi * phase))
+    return (
+        max(0, min(255, int(rgb[0] * pulse))),
+        max(0, min(255, int(rgb[1] * pulse))),
+        max(0, min(255, int(rgb[2] * pulse))),
+    )
+
+
 def parse_line(line: str) -> Command:
     """Turn one typed line into a hardware command. No I/O."""
     text = (line or "").strip()
@@ -282,6 +328,8 @@ def parse_line(line: str) -> Command:
     music_kind = _music_kind(text)
     if music_kind == "music":
         return Command("music", None, "放音乐。")
+    if music_kind == "music_next":
+        return Command("music_next", None, "下一首。")
     if music_kind == "music_stop":
         return Command("music_stop", None, "停了。")
 
@@ -316,7 +364,7 @@ def parse_line(line: str) -> Command:
         return Command(
             "unknown",
             text,
-            "我还没学会这句。可以说：你好、点头、暖光、关灯、音乐。输入 help 看全部。",
+            "我还没学会这句。可以说：你好、点头、暖光、关灯、音乐、下一首。输入 help 看全部。",
         )
     spoken = {
         "wake_up": "你好呀，我是台灯。",
@@ -342,6 +390,7 @@ def command_phrases() -> List[str]:
         | set(RECORDINGS)
         | set(MUSIC_START)
         | set(MUSIC_STOP)
+        | set(MUSIC_NEXT)
         | set(extra)
     )
     return sorted(phrases, key=lambda item: (-len(item), item))
@@ -370,7 +419,7 @@ def _compact_speech(transcript: str) -> str:
 
 
 def _music_kind(transcript: str) -> Optional[str]:
-    """Return music / music_stop if the transcript names a song command."""
+    """Return music / music_next / music_stop if the transcript names a song command."""
     compact = _compact_speech(transcript)
     low = compact.lower()
     blobs = (compact, low, (transcript or "").strip().lower())
@@ -378,6 +427,10 @@ def _music_kind(transcript: str) -> Optional[str]:
         needle = _compact_speech(phrase).lower()
         if needle and any(needle in blob for blob in blobs):
             return "music_stop"
+    for phrase in sorted(MUSIC_NEXT, key=len, reverse=True):
+        needle = _compact_speech(phrase).lower()
+        if needle and any(needle in blob for blob in blobs):
+            return "music_next"
     for phrase in sorted(MUSIC_START, key=len, reverse=True):
         needle = _compact_speech(phrase).lower()
         if needle and any(needle in blob for blob in blobs):
@@ -1317,8 +1370,8 @@ def apply_speech(lamp: LocalLamp, transcript: str) -> str:
     phrase = extract_spoken_command(transcript)
     raw = phrase or compact or (transcript or "").strip()
     cmd = parse_line(raw)
-    if lamp.music_playing and cmd.kind not in {"music_stop", "quit", "music"}:
-        print("正在跳舞")
+    if lamp.music_playing and cmd.kind not in {"music_stop", "quit", "music", "music_next"}:
+        print("正在放歌")
         return "busy"
     if cmd.kind in {"unknown", "noop"}:
         print(f"听到「{transcript}」，但不是灯的指令。")
@@ -1343,8 +1396,8 @@ def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path)
         daemon=True,
     )
     worker.start()
-    print("麦克风线程已开。请说：你好、点头、关灯、音乐。打字回车也可以。")
-    print("音乐指令已开：听到「音乐」就随机播放 music/ 文件夹。")
+    print("麦克风线程已开。请说：你好、点头、关灯、音乐、下一首。打字回车也可以。")
+    print("音乐指令已开：听到「音乐」播放，「下一首」切歌。放歌时灯做渐变，电机不动。")
     try:
         while True:
             try:
@@ -1403,8 +1456,12 @@ class LocalLamp:
         self.rgb = None
         self._music_proc = None
         self._music_stop = threading.Event()
-        self._dance_thread = None
+        self._viz_thread = None
         self._music_playing = False
+        self._playlist: List[Path] = []
+        self._playlist_index = 0
+        self._viz_rgb: Optional[Tuple[int, int, int]] = None
+        self._pre_music_rgb: Tuple[int, int, int] = MOOD_RGB["warm"]
         self.mic_hold = threading.Event()
 
     def start(self) -> None:
@@ -1460,38 +1517,47 @@ class LocalLamp:
             return
         self.rgb.dispatch("solid", scaled)
 
+    def _paint_rgb(self, rgb: Tuple[int, int, int], *, quiet: bool = False) -> None:
+        """Push a color without treating it as the saved mood."""
+        scaled = _scale_rgb(rgb, self.brightness)
+        self.last_rgb = scaled
+        if self.sim or self.rgb is None:
+            if not quiet:
+                print(f"[sim] rgb {scaled} brightness={self.brightness}")
+            return
+        self.rgb.dispatch("solid", scaled)
+
     @property
     def music_playing(self) -> bool:
         return bool(self._music_playing)
 
-    def _flash_rgb(self, rgb: Tuple[int, int, int]) -> None:
-        scaled = _scale_rgb(rgb, self.brightness)
-        self.last_rgb = scaled
-        if self.sim or self.rgb is None:
-            print(f"[sim] rgb {scaled} brightness={self.brightness}")
-            return
-        self.rgb.dispatch("solid", scaled)
+    def _rebuild_playlist(self, *, shuffle: bool = True) -> List[Path]:
+        root = ensure_music_dir()
+        files = list_music_files(root)
+        if not files:
+            files = ensure_builtin_music(root / ".builtin")
+            print(f"music 文件夹是空的，把 wav/mp3 放到 {root}")
+        self._playlist = list(files)
+        if shuffle:
+            random.shuffle(self._playlist)
+        self._playlist_index = 0
+        return self._playlist
 
-    def _dance_step(self, beat: int) -> None:
-        # RGB only. Playing official recordings here races MotorsService
-        # on /dev/ttyACM0 ("Port is in use").
-        self._flash_rgb(MOOD_RGB["happy"] if beat % 2 == 0 else MOOD_RGB["talk"])
-
-    def _dance_loop(self, bpm: int) -> None:
-        period = 60.0 / max(40, min(220, int(bpm)))
-        beat = 0
-        next_beat = time.monotonic()
+    def _viz_loop(self, bpm: int, hue_shift: float) -> None:
+        t0 = time.monotonic()
+        self._viz_rgb = None
         while not self._music_stop.is_set():
-            now = time.monotonic()
-            if now < next_beat:
-                time.sleep(min(0.03, next_beat - now))
-                continue
-            self._dance_step(beat)
-            beat += 1
-            next_beat += period
+            t = time.monotonic() - t0
+            target = music_viz_color(t=t, bpm=bpm, hue_shift=hue_shift)
+            if self._viz_rgb is None:
+                self._viz_rgb = target
+            else:
+                self._viz_rgb = lerp_rgb(self._viz_rgb, target, 0.18)
+            self._paint_rgb(self._viz_rgb, quiet=True)
             proc = self._music_proc
             if proc is not None and proc.poll() is not None:
                 break
+            time.sleep(0.04)
         self._music_playing = False
         self._release_mic()
 
@@ -1505,21 +1571,26 @@ class LocalLamp:
             self.mic_hold.clear()
             print("喇叭还声卡")
 
-    def play_music(self) -> str:
-        self.stop_music()
-        try:
-            path, bpm = pick_random_track()
-        except RuntimeError as exc:
-            print(str(exc))
+    def _play_current_track(self) -> str:
+        if not self._playlist:
+            try:
+                self._rebuild_playlist(shuffle=True)
+            except Exception:
+                self._playlist = []
+        if not self._playlist:
+            print("没有音乐")
             return "没有音乐"
+        path = self._playlist[self._playlist_index % len(self._playlist)]
+        bpm = bpm_from_name(path) or 120
+        hue_shift = random.random()
         self.last_music = path.name
-        self.last_expression = "happy_wiggle"
-        self._apply_rgb(MOOD_RGB["happy"])
+        self._pre_music_rgb = self.base_rgb
+        wash = music_viz_color(t=0.0, bpm=bpm, hue_shift=hue_shift)
         print(f"music {path.name} bpm={bpm}")
         self._music_stop.clear()
         self._music_playing = True
+        self._paint_rgb(wash, quiet=self.sim)
         if self.sim:
-            self._dance_step(0)
             return f"music {path.name}"
         self._hold_mic()
         proc = start_music_player(path)
@@ -1527,29 +1598,45 @@ class LocalLamp:
         if proc is None:
             print_mpg123_install_hint()
             self._release_mic()
-        self._dance_thread = threading.Thread(
-            target=self._dance_loop,
-            args=(bpm,),
+        self._viz_thread = threading.Thread(
+            target=self._viz_loop,
+            args=(bpm, hue_shift),
             daemon=True,
-            name="lelamp-dance",
+            name="lelamp-viz",
         )
-        self._dance_thread.start()
+        self._viz_thread.start()
         return f"music {path.name}"
 
-    def stop_music(self) -> str:
+    def play_music(self) -> str:
+        self.stop_music(restore=False)
+        files = self._rebuild_playlist(shuffle=True)
+        if not files:
+            return "没有音乐"
+        return self._play_current_track()
+
+    def next_music(self) -> str:
+        if not self._playlist:
+            return self.play_music()
+        self.stop_music(restore=False)
+        self._playlist_index = (self._playlist_index + 1) % len(self._playlist)
+        print("music next")
+        return self._play_current_track()
+
+    def stop_music(self, *, restore: bool = True) -> str:
         self._music_stop.set()
         proc = self._music_proc
         self._music_proc = None
         _stop_process(proc)
-        thread = self._dance_thread
-        self._dance_thread = None
+        thread = self._viz_thread
+        self._viz_thread = None
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=2.5)
-        was = self._music_playing or bool(self.last_music)
+        was = self._music_playing
         self._music_playing = False
         self._release_mic()
-        if was:
+        if was and restore:
             print("music stop")
+            self._apply_rgb(self._pre_music_rgb)
         return "停了。"
 
     def apply(self, cmd: Command) -> str:
@@ -1565,6 +1652,8 @@ class LocalLamp:
             )
         if cmd.kind == "music":
             return self.play_music()
+        if cmd.kind == "music_next":
+            return self.next_music()
         if cmd.kind == "music_stop":
             return self.stop_music()
         if cmd.kind == "express":

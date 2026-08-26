@@ -123,6 +123,7 @@ def test_bare_music_word_is_a_command():
     assert parse_line("停止音乐").kind == "music_stop"
     assert extract_spoken_command("音乐") == "音乐"
     assert extract_spoken_command("音 乐") == "音乐"
+    assert extract_spoken_command("下一首") == "下一首"
 
 
 def test_show_stage_prints_current_stage(capsys):
@@ -194,10 +195,15 @@ def test_music_command_plays_from_folder(tmp_path, monkeypatch, capsys):
     out = lamp.apply(parse_line("音乐"))
     assert out.startswith("music ")
     assert lamp.last_music == "desk_tune_96.wav"
-    assert lamp.last_expression == "happy_wiggle"
+    assert lamp.last_expression != "happy_wiggle"
     assert lamp.music_playing is True
     printed = capsys.readouterr().out
     assert "bpm=" in printed
+    assert lamp.last_rgb != (0, 0, 0)
+
+    assert apply_speech(lamp, "今天天气") == "busy"
+    assert apply_speech(lamp, "停止音乐") == "music_stop"
+    assert lamp.music_playing is False
 
     assert apply_speech(lamp, "今天天气") == "busy"
     assert apply_speech(lamp, "停止音乐") == "music_stop"
@@ -285,7 +291,44 @@ def test_choose_playback_seeed_skips_bluetooth(monkeypatch):
     assert (device, card, backend) == ("plughw:0,0", "0", "alsa")
 
 
-def test_music_rgb_pulse_does_not_play_recordings():
+def test_next_song_command_skips_current_track(tmp_path, monkeypatch):
+    monkeypatch.setenv("LELAMP_MUSIC_DIR", str(tmp_path))
+    first = tmp_path / "a_100.wav"
+    second = tmp_path / "b_120.wav"
+    write_beat_wav(first, bpm=100, notes=(0, 4, 7), seconds=0.2)
+    write_beat_wav(second, bpm=120, notes=(0, 4, 7), seconds=0.2)
+    monkeypatch.setattr("plugins.lelamp.local_main.random.shuffle", lambda items: items.sort(key=lambda p: p.name))
+
+    assert parse_line("下一首").kind == "music_next"
+    assert parse_line("换一首").kind == "music_next"
+    spoken = extract_spoken_command("请下一首")
+    assert spoken
+    assert parse_line(spoken).kind == "music_next"
+    assert parse_line("下一首").kind != "music"
+
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    lamp.apply(parse_line("音乐"))
+    assert lamp.last_music == "a_100.wav"
+    assert apply_speech(lamp, "下一首") == "music_next"
+    assert lamp.last_music == "b_120.wav"
+    assert lamp.music_playing is True
+
+
+def test_music_viz_warm_highs_cool_lows():
+    from plugins.lelamp.local_main import music_viz_color
+
+    bass = music_viz_color(t=0.0, bpm=120, hue_shift=0.2)
+    treble = music_viz_color(t=0.25, bpm=120, hue_shift=0.2)
+    assert (bass[0] - bass[2]) < (treble[0] - treble[2])
+
+
+def test_music_visualizer_does_not_play_recordings():
     lamp = LocalLamp(
         sim=True,
         port="/dev/null",
@@ -294,7 +337,9 @@ def test_music_rgb_pulse_does_not_play_recordings():
         brightness=70,
     )
     lamp.last_expression = "wake_up"
-    lamp._dance_step(2)
+    from plugins.lelamp.local_main import music_viz_color
+
+    lamp._paint_rgb(music_viz_color(t=0.0, bpm=100, hue_shift=0.4), quiet=True)
     assert lamp.last_expression == "wake_up"
     assert lamp.last_rgb != (0, 0, 0)
 
