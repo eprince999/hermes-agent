@@ -184,11 +184,37 @@ LIGHT_ONLY: Dict[str, str] = {
     "专注": "focus",
 }
 
+EXPRESSION_REPLIES: Dict[str, str] = {
+    "wake_up": "你好呀，我是台灯。",
+    "nod": "好的。",
+    "headshake": "这个不行。",
+    "curious": "嗯？",
+    "scanning": "我看看。",
+    "excited": "好激动！",
+    "happy_wiggle": "开心！",
+    "shock": "哇！",
+    "shy": "有点不好意思。",
+    "sad": "唉。",
+    "idle": "我歇一会儿。",
+}
+
+# Only for express(feeling=...), not for whole-utterance parse_line.
+AGREE_FEELINGS = {
+    "同意", "赞同", "赞成", "可以", "好啊", "没问题", "对的",
+    "yes", "agree", "ok", "okay",
+}
+DISAGREE_FEELINGS = {
+    "不同意", "不赞同", "反对", "不行", "拒绝", "做不到", "不可以",
+    "no", "disagree", "refuse",
+}
+_POLITE_PREFIXES = ("麻烦你", "请你", "帮我", "麻烦", "劳驾", "请")
+
 HELP_TEXT = """本地台灯 Stage 4（Cursor API + 喇叭，无 OpenAI）
 动作：你好 / 点头 / 摇头 / 好奇 / 张望 / 开心 / 兴奋 / 惊讶 / 害羞 / 难过 / 待机
 灯光：开灯 / 关灯 / 暖光 / 冷光 / 自动 / 亮一点 / 暗一点
 喇叭：大声 / 小声 / volume 80；先测：--speak 你好
-说话：--listen；不会的句子交给 Cursor（CURSOR_API_KEY）
+说话：直接讲完整的话。短指令本地执行；完整句子交给 Cursor。
+      同意会点头，不同意会摇头。
 其它：status  rgb 255 176 80  help  q
 """
 
@@ -297,19 +323,7 @@ def parse_line(line: str) -> Command:
             text,
             "我还没学会这句。可以说：你好、点头、暖光、关灯。输入 help 看全部。",
         )
-    spoken = {
-        "wake_up": "你好呀，我是台灯。",
-        "nod": "好的。",
-        "headshake": "这个不行。",
-        "curious": "嗯？",
-        "scanning": "我看看。",
-        "excited": "好激动！",
-        "happy_wiggle": "开心！",
-        "shock": "哇！",
-        "shy": "有点不好意思。",
-        "sad": "唉。",
-        "idle": "我歇一会儿。",
-    }.get(recording, recording)
+    spoken = EXPRESSION_REPLIES.get(recording, recording)
     return Command("express", recording, spoken)
 
 
@@ -351,9 +365,55 @@ def extract_spoken_command(transcript: str) -> Optional[str]:
     return best_phrase
 
 
+def direct_spoken_command(transcript: str) -> Optional[str]:
+    """Local command only when the utterance IS the command (plus 请/帮我).
+
+    Longer sentences go to Cursor so it can nod/shake from meaning, not
+    from a keyword buried in the sentence.
+    """
+    compact = _compact_speech(transcript)
+    if not compact:
+        return None
+    if parse_line(compact).kind != "unknown":
+        return compact
+    for prefix in _POLITE_PREFIXES:
+        if compact.startswith(prefix):
+            rest = compact[len(prefix):]
+            if rest and parse_line(rest).kind != "unknown":
+                return rest
+    return None
+
+
+def resolve_feeling(name: str) -> str:
+    """Map express() feeling, including 同意/不同意, onto a recording."""
+    raw = (name or "").strip()
+    try:
+        return resolve_expression(raw)
+    except ValueError:
+        pass
+    compact = _compact_speech(raw)
+    key = compact.lower()
+    if compact in AGREE_FEELINGS or key in AGREE_FEELINGS:
+        return "nod"
+    if compact in DISAGREE_FEELINGS or key in DISAGREE_FEELINGS:
+        return "headshake"
+    cmd = parse_line(raw)
+    if cmd.kind == "express":
+        return str(cmd.payload)
+    raise ValueError(raw)
+
+
 CURSOR_LAMP_INSTRUCTIONS = """你是书桌上的智能灯 LeLamp。用简体中文短句说话，像一个稍微笨拙、很热心的台灯。
-用工具控制身体和灯光，不要假装已经动过。不要改文件、不要开 shell。
-express：点头/摇头/打招呼等动作（feeling 用 你好、点头、摇头、开心、难过、好奇、待机 等）。
+用工具控制身体和灯光。不要假装已经动过。不要改文件、不要开 shell。
+
+每一次回答都必须先调用 express，再说话：
+- 同意、肯定、愿意帮忙、觉得用户说得对 → feeling=点头
+- 拒绝、反对、做不到、觉得不行 → feeling=摇头
+- 没听清或不确定 → feeling=好奇
+- 打招呼 → feeling=你好
+- 开心 → feeling=开心；难过 → feeling=难过
+
+不要等用户说出「点头」「摇头」才动。用户在聊天、提问、征求意见时，根据你是否赞同来点头或摇头。
 set_mood：只改灯（暖光、冷光、关灯、开灯、亮一点、暗一点）。
 set_rgb：用户说了具体颜色时用。
 """
@@ -521,10 +581,15 @@ def execute_lamp_tool(lamp: "LocalLamp", name: str, args: Optional[dict] = None)
     """Run a Cursor custom tool against the local lamp body."""
     payload = args or {}
     if name == "express":
-        cmd = parse_line(str(payload.get("feeling") or ""))
-        if cmd.kind == "unknown":
-            return cmd.reply
-        return lamp.apply(cmd) or f"ok {cmd.kind}"
+        feeling = str(payload.get("feeling") or "")
+        try:
+            rec = resolve_feeling(feeling)
+        except ValueError:
+            cmd = parse_line(feeling)
+            if cmd.kind == "unknown":
+                return cmd.reply
+            return lamp.apply(cmd) or f"ok {cmd.kind}"
+        return lamp.apply(Command("express", rec, EXPRESSION_REPLIES.get(rec, rec))) or f"ok {rec}"
     if name == "set_mood":
         cmd = parse_line(str(payload.get("mood") or ""))
         if cmd.kind == "unknown":
@@ -665,11 +730,14 @@ class CursorLampSession:
                 cwd=str(self._workspace),
                 custom_tools={
                     "express": CustomTool(
-                        description="Play a lamp body recording and matching light. feeling: 你好, 点头, 摇头, 开心, 难过, 好奇, 待机.",
+                        description="Move the lamp body BEFORE you talk. feeling=点头 if you agree, 摇头 if you disagree/refuse, also 你好/开心/难过/好奇/待机.",
                         input_schema={
                             "type": "object",
                             "properties": {
-                                "feeling": {"type": "string"},
+                                "feeling": {
+                                    "type": "string",
+                                    "description": "点头, 摇头, 你好, 开心, 难过, 好奇, 惊讶, 害羞, 待机, 同意, 不同意",
+                                },
                             },
                             "required": ["feeling"],
                         },
@@ -704,9 +772,10 @@ class CursorLampSession:
 
     def ask(self, text: str) -> str:
         self.start()
-        prompt = text
+        nudge = "先调用 express：同意=点头，不同意=摇头，再短句中文回答。\n用户："
+        prompt = nudge + text
         if self._first:
-            prompt = CURSOR_LAMP_INSTRUCTIONS + "\n\n用户：" + text
+            prompt = CURSOR_LAMP_INSTRUCTIONS + "\n\n" + prompt
             self._first = False
         run = self._agent.send(prompt)
         reply = _cursor_run_text(run)
@@ -840,18 +909,18 @@ def apply_speech(
     brain: Optional[CursorLampSession] = None,
 ) -> str:
     print(f"灯< {transcript}")
-    phrase = extract_spoken_command(transcript)
-    if not phrase:
-        if brain is not None:
-            print("Cursor …")
-            reply = brain.ask(transcript)
-            utter(lamp, reply)
-            return "chat"
-        print(f"听到「{transcript}」，但不是灯的指令。")
-        return "unknown"
-    if phrase != _compact_speech(transcript):
-        print(f"听成：{phrase}")
-    return dispatch_text(lamp, phrase)
+    phrase = direct_spoken_command(transcript)
+    if phrase:
+        if phrase != _compact_speech(transcript):
+            print(f"听成：{phrase}")
+        return dispatch_text(lamp, phrase, brain)
+    if brain is not None:
+        print("Cursor …")
+        reply = brain.ask(transcript)
+        utter(lamp, reply)
+        return "chat"
+    print(f"听到「{transcript}」，但不是灯的指令。")
+    return "unknown"
 
 
 def run_listen_loop(
@@ -869,7 +938,7 @@ def run_listen_loop(
         daemon=True,
     )
     worker.start()
-    print("麦克风线程已开。请说：你好、点头、关灯。打字回车也可以。")
+    print("麦克风线程已开。短指令（关灯、点头）立刻做；完整的话交给大模型，同意点头、不同意摇头。打字回车也可以。")
     try:
         while True:
             try:
@@ -1089,7 +1158,7 @@ class LocalLamp:
         self.brightness = bri
         self._apply_rgb(MOOD_RGB[mood])
         self._play("wake_up")
-        print(f"台灯醒了。现在 {mood} 光，亮度 {self.brightness}%。输入 help 看命令。")
+        print(f"台灯醒了。现在 {mood} 光，亮度 {self.brightness}%。直接说话，同意我会点头，不同意就摇头。")
         self.speak("你好，我是台灯。")
 
 
@@ -1153,7 +1222,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for phrase in args.speak:
             lamp.speak(phrase)
         for phrase in args.say:
-            if apply_speech(lamp, phrase) == "quit":
+            if apply_speech(lamp, phrase, brain) == "quit":
                 return 0
         for text in args.ask:
             print(f"你：{text}")

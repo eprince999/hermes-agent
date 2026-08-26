@@ -6,10 +6,13 @@ from pathlib import Path
 
 from plugins.lelamp.local_main import (
     LocalLamp,
+    apply_speech,
     cursor_api_key,
+    direct_spoken_command,
     execute_lamp_tool,
     extract_spoken_command,
     parse_line,
+    resolve_feeling,
     speak_text,
 )
 
@@ -178,6 +181,75 @@ def test_extract_spoken_command_from_padded_asr():
     assert extract_spoken_command("你 好 呀") == "你好"
     assert extract_spoken_command("今天天气怎么样") is None
     assert extract_spoken_command("不要关灯") == "不要"
+
+
+def test_direct_spoken_command_keeps_full_sentences_for_the_model():
+    assert direct_spoken_command("关灯") == "关灯"
+    assert direct_spoken_command("请点头") == "点头"
+    assert direct_spoken_command("帮我暖光") == "暖光"
+    assert direct_spoken_command("这样用暖光看书你同意吗") is None
+    assert direct_spoken_command("今天天气怎么样") is None
+
+
+def test_resolve_feeling_agree_and_disagree():
+    assert resolve_feeling("点头") == "nod"
+    assert resolve_feeling("同意") == "nod"
+    assert resolve_feeling("赞同") == "nod"
+    assert resolve_feeling("摇头") == "headshake"
+    assert resolve_feeling("不同意") == "headshake"
+    assert resolve_feeling("做不到") == "headshake"
+
+
+def test_express_tool_nods_on_agree_feeling():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    execute_lamp_tool(lamp, "express", {"feeling": "同意"})
+    assert lamp.last_expression == "nod"
+    execute_lamp_tool(lamp, "express", {"feeling": "不同意"})
+    assert lamp.last_expression == "headshake"
+
+
+def test_long_speech_goes_to_cursor_not_keyword_snip():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    seen = []
+
+    class Brain:
+        def ask(self, text):
+            seen.append(text)
+            return "嗯，我同意。"
+
+    result = apply_speech(lamp, "这样调成暖光你同意吗", Brain())
+    assert result == "chat"
+    assert seen == ["这样调成暖光你同意吗"]
+    assert lamp.last_expression != "nod"
+
+
+def test_short_keyword_speech_stays_local():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+
+    class Brain:
+        def ask(self, text):
+            raise AssertionError("short 点头 should not call Cursor")
+
+    apply_speech(lamp, "点头", Brain())
+    assert lamp.last_expression == "nod"
 
 
 def test_show_stage_prints_current_stage(capsys):
