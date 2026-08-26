@@ -233,7 +233,7 @@ def test_express_tool_nods_on_agree_feeling():
     assert lamp.last_expression == "headshake"
 
 
-def test_long_speech_goes_to_model_not_keyword_snip():
+def test_long_speech_is_ignored_not_keyword_snip():
     lamp = LocalLamp(
         sim=True,
         port="/dev/null",
@@ -249,8 +249,8 @@ def test_long_speech_goes_to_model_not_keyword_snip():
             return "ok"
 
     result = apply_speech(lamp, "Do you agree warm light is nicer", Brain(), pose_chance=1.0)
-    assert result == "chat"
-    assert seen == ["Do you agree warm light is nicer"]
+    assert result == "unknown"
+    assert seen == []
     assert lamp.last_expression != "nod"
     assert lamp.last_spoken == ""
 
@@ -273,7 +273,7 @@ def test_short_keyword_speech_stays_local():
     assert lamp.last_spoken == ""
 
 
-def test_spoken_chat_goes_to_model_for_a_pose():
+def test_spoken_keywords_stay_local_without_a_prompt():
     lamp = LocalLamp(
         sim=True,
         port="/dev/null",
@@ -288,10 +288,11 @@ def test_spoken_chat_goes_to_model_for_a_pose():
             seen.append(text)
             return "I would talk but the lamp stays silent."
 
-    assert apply_speech(lamp, "nod", Brain(), pose_chance=1.0) == "chat"
-    assert apply_speech(lamp, "how are you", Brain(), pose_chance=1.0) == "chat"
-    assert apply_speech(lamp, "yeah I like the warm light", Brain(), pose_chance=1.0) == "chat"
-    assert seen == ["nod", "how are you", "yeah I like the warm light"]
+    assert apply_speech(lamp, "nod", Brain(), pose_chance=1.0) == "express"
+    assert apply_speech(lamp, "how are you", Brain(), pose_chance=1.0) == "unknown"
+    assert apply_speech(lamp, "yeah I like the warm light", Brain(), pose_chance=1.0) == "unknown"
+    assert seen == []
+    assert lamp.last_expression == "nod"
     assert lamp.last_spoken == ""
 
 
@@ -400,6 +401,7 @@ def test_tracked_stage_snapshots_keep_dance_on_stage4():
     assert "AGENT_STAGE = 4" in stage4
     assert "def play_music" in stage4
     assert "MUSIC_START" in stage4
+    assert "brain.ask(transcript)" not in stage4
 
 
 def test_main_sim_say_phrases_without_repl(capsys):
@@ -465,7 +467,7 @@ def test_express_tool_only_plays_official_recordings():
     assert "unknown pose" in out
 
 
-def test_chat_pose_coin_flip_skips_the_model():
+def test_leftover_talk_does_not_call_a_model():
     lamp = LocalLamp(
         sim=True,
         port="/dev/null",
@@ -480,10 +482,9 @@ def test_chat_pose_coin_flip_skips_the_model():
             seen.append(text)
             return ""
 
-    assert apply_speech(lamp, "how are you", Brain(), pose_chance=0.0) == "skip"
+    assert apply_speech(lamp, "how are you", Brain(), pose_chance=0.0) == "unknown"
+    assert apply_speech(lamp, "how are you", Brain(), pose_chance=1.0) == "unknown"
     assert seen == []
-    assert apply_speech(lamp, "how are you", Brain(), pose_chance=1.0) == "chat"
-    assert seen == ["how are you"]
 
 
 def test_should_pose_from_chat_uses_chance():
@@ -591,7 +592,6 @@ def test_main_sim_speak_without_cursor(capsys):
     out = capsys.readouterr().out
     assert f"stage {local_main.AGENT_STAGE}" in out
     assert "[sim] speak Hey. I'm here with you." in out
-    assert "desk commands" in out
 
 
 def test_main_no_cursor_keeps_keywords_silent(monkeypatch, capsys):
@@ -963,7 +963,7 @@ def test_look_tool_uses_sim_camera():
     assert lamp.last_expression == "scanning"
 
 
-def test_what_do_you_see_goes_to_model():
+def test_what_do_you_see_snaps_locally():
     lamp = LocalLamp(
         sim=True,
         port="/dev/null",
@@ -980,8 +980,9 @@ def test_what_do_you_see_goes_to_model():
 
     assert parse_line("what do you see").kind == "snap"
     assert parse_line("look").kind == "snap"
-    assert apply_speech(lamp, "what do you see", Brain(), pose_chance=1.0) == "chat"
-    assert seen == ["what do you see"]
+    assert apply_speech(lamp, "what do you see", Brain(), pose_chance=1.0) == "snap"
+    assert seen == []
+    assert lamp.last_expression == "scanning"
     assert lamp.last_spoken == ""
 
 

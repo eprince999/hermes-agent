@@ -15,15 +15,13 @@ Keep official ``main.py`` untouched. From the runtime repo root:
     sudo uv run python local_main.py --snapshot
 
 Stage 4: Vosk hears English. Desk commands (lights, brightness, study/reading,
-closer) run locally. Say music to play a random beat and dance on the beat.
-Other talk is sent to Cursor with a coin-flip; if it fires, it may play one
-official recording. No spoken replies.
+closer, music) run locally. No model prompt. No spoken replies.
 
 Roadmap:
   1. keyboard + motors + RGB
   2. on-device speech keywords (Vosk)
   3. Vosk + silent pose
-  4. music + beat dance (this file)
+  4. music + beat dance, no model prompt (this file)
 """
 
 from __future__ import annotations
@@ -1805,13 +1803,6 @@ def dispatch_text(lamp: LocalLamp, raw: str, brain: Optional[CursorLampSession] 
             print("no camera still")
         return "snap"
     if cmd.kind == "unknown":
-        if brain is not None:
-            if not should_pose_from_chat():
-                print("still")
-                return "skip"
-            brain.ask(raw)
-            return "chat"
-        utter(lamp, cmd.reply)
         return "unknown"
     lamp.apply(cmd)
     return cmd.kind
@@ -1840,24 +1831,11 @@ def apply_speech(
             return dispatch_text(lamp, hardware, None)
         print("busy dancing")
         return "busy"
-    if brain is not None:
-        hardware = hardware_spoken_command(transcript)
-        if hardware:
-            if hardware != compact:
-                print(f"heard as: {hardware}")
-            return dispatch_text(lamp, hardware, None)
-        chance = POSE_CHANCE if pose_chance is None else pose_chance
-        if not should_pose_from_chat(chance=chance, rng=rng):
-            print("still")
-            return "skip"
-        brain.ask(transcript)
-        return "chat"
     phrase = direct_spoken_command(transcript)
     if phrase:
         if phrase != compact:
             print(f"heard as: {phrase}")
         return dispatch_text(lamp, phrase, None)
-    print(f"I heard “{transcript}”, but that isn't a lamp command.")
     return "unknown"
 
 
@@ -1889,10 +1867,10 @@ def run_listen_loop(
     catcher = SpeechCatcher(hold_s=hold_s)
     awake_until = 0.0
     if wake_word:
-        print("Mic on. Say hello lamp once, then talk. I may pose from recordings.")
-        print("Desk commands (lights / study / reading / closer / music) skip the wake word.")
+        print("Mic on. Say hello lamp once, then a command.")
+        print("Commands: lights / study / reading / closer / music.")
     else:
-        print("Mic on (no wake word). I pose from what you mean. No voice reply.")
+        print("Mic on (no wake word).")
     try:
         while True:
             try:
@@ -2357,8 +2335,6 @@ class LocalLamp:
         self.brightness = bri
         self._apply_rgb(MOOD_RGB[mood])
         self._play("wake_up")
-        print("Lamp's awake. I'll nod or shake from what you mean. No voice.")
-        print("To talk, say hello lamp first.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2432,12 +2408,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         speak_enabled=speak_enabled,
     )
     brain = None
-    if not args.no_cursor and os.environ.get("CURSOR_API_KEY"):
-        brain = CursorLampSession(lamp)
-    if brain is not None:
-        print("talk: desk commands are local (including music). Other talk: coin-flip official pose. No voice.")
-    else:
-        print("talk: local desk commands. Put CURSOR_API_KEY=crsr_... in .env for chat poses.")
     if speak_enabled:
         print(describe_tts())
     voice_warm = None
@@ -2447,8 +2417,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     lamp.start()
     if voice_warm is not None:
         voice_warm.join(timeout=20)
-    if brain is not None and (args.listen or args.ask):
-        brain.start()
     try:
         if not args.no_wake:
             lamp.wake()

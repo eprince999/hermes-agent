@@ -52,7 +52,7 @@ Stage 2 (ReSpeaker, English): `uv add vosk`, then `--download-vosk` (English sma
 
 Stage 3 (Vosk + silent poses): desk commands run locally (`lights on/off`, `study mode`, `reading mode`, `closer`). Other talk is coin-flipped to Cursor for one official recording. No spoken replies.
 
-Stage 4 (Vosk + music dance): same as stage 3, plus **`music` / `dance`** (random beat + twist on the rhythm) and **`stop music`**. Extra wav/mp3 files can go in `~/lelamp_runtime/music/`. Test with `--sim --no-cursor --say "music"`. `--show-stage` starts with `4`.
+Stage 4 (Vosk + music dance): no model prompt. Voice **desk commands run locally**: `lights on` / `lights off`, `brighter` / `dimmer`, `study mode`, `reading mode`, `closer`, **`music` / `dance`**, **`stop music`**. Other talk is ignored. Test with `--sim --no-cursor --say "music"`. `--show-stage` starts with `4`.
 
 The LiveKit + OpenAI Realtime path is optional later: copy `plugins/lelamp/runtime_main.py` over `~/lelamp_runtime/main.py`, put `OPENAI_API_KEY` in `.env`, then `sudo uv run main.py console`.
 
