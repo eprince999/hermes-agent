@@ -48,7 +48,7 @@ Keep the runnable name `local_main.py`. After a stage works, run `sudo uv run py
 
 Stage 1 (keyboard, no cloud): `sudo uv run python local_main.py`. Type `你好` / `点头` / `暖光` / `关灯`. `--sim` prints actions without servos.
 
-Stage 2 (ReSpeaker keywords): `uv add vosk`, then `--download-vosk` and `--listen`. Mapping without a mic: `--say 请关灯`.
+Stage 2 (ReSpeaker): `uv add vosk`, then `--download-vosk` and `--listen`. Say **你好台灯**, wait for 我在, then one full sentence. Short commands (`关灯`, `点头`) skip the wake word. `--no-wake-word` opens the mic. Mapping without a mic: `--say 请关灯`.
 
 Stage 3 (Cursor API brain): put `CURSOR_API_KEY=crsr_...` in `~/lelamp_runtime/.env` (key from https://cursor.com/dashboard/api). `uv add cursor-sdk`, then `sudo uv run python local_main.py --sim --ask "把灯调成暖光并点点头"`. Short keywords still run locally. Full sentences go to Cursor, which must `express` first: agree → nod, disagree → headshake. This is cursor-sdk (local custom tools), not a DeepSeek/OpenAI chat URL.
 

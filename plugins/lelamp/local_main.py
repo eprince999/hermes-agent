@@ -207,13 +207,21 @@ DISAGREE_FEELINGS = {
     "不同意", "不赞同", "反对", "不行", "拒绝", "做不到", "不可以",
     "no", "disagree", "refuse",
 }
+WAKE_PHRASES = (
+    "你好台灯",
+    "台灯你好",
+    "嘿台灯",
+    "嗨台灯",
+    "hello台灯",
+)
+_COMPLETE_ENDINGS = ("吗", "呢", "吧", "啊", "呀", "了", "哦", "嘛", "哈")
 _POLITE_PREFIXES = ("麻烦你", "请你", "帮我", "麻烦", "劳驾", "请")
 
 HELP_TEXT = """本地台灯 Stage 4（Cursor API + 喇叭，无 OpenAI）
 动作：你好 / 点头 / 摇头 / 好奇 / 张望 / 开心 / 兴奋 / 惊讶 / 害羞 / 难过 / 待机
 灯光：开灯 / 关灯 / 暖光 / 冷光 / 自动 / 亮一点 / 暗一点
 喇叭：大声 / 小声 / volume 80；先测：--speak 你好
-说话：直接讲完整的话。短指令本地执行；完整句子交给 Cursor。
+说话：先说「你好台灯」，再说完整的一句。短指令（关灯/点头）立刻做。
       同意会点头，不同意会摇头。
 其它：status  rgb 255 176 80  help  q
 """
@@ -384,6 +392,123 @@ def direct_spoken_command(transcript: str) -> Optional[str]:
     return None
 
 
+def join_speech(*pieces: str) -> str:
+    """Glue Vosk fragments. '今天' + '几号了' → '今天几号了'."""
+    acc = ""
+    for raw in pieces:
+        piece = (raw or "").strip()
+        if not piece:
+            continue
+        a = _compact_speech(acc)
+        b = _compact_speech(piece)
+        if not b:
+            continue
+        if not a:
+            acc = piece
+            continue
+        if b.startswith(a) or a in b:
+            acc = piece
+            continue
+        if a.startswith(b) or b in a:
+            continue
+        acc = a + b
+    return _compact_speech(acc)
+
+
+def split_wake(transcript: str) -> Tuple[bool, str]:
+    """If a wake phrase is present, return (True, remainder)."""
+    compact = _compact_speech(transcript)
+    if not compact:
+        return False, ""
+    for phrase in sorted(WAKE_PHRASES, key=len, reverse=True):
+        pos = compact.find(phrase)
+        if pos < 0:
+            continue
+        rest = compact[:pos] + compact[pos + len(phrase):]
+        return True, rest
+    return False, compact
+
+
+def looks_complete_utterance(transcript: str) -> bool:
+    compact = _compact_speech(transcript)
+    if not compact:
+        return False
+    if direct_spoken_command(compact):
+        return True
+    hit, rest = split_wake(compact)
+    if hit and not rest:
+        return True
+    if hit and rest and (direct_spoken_command(rest) or looks_complete_rest(rest)):
+        return True
+    if len(compact) >= 5 and compact.endswith(_COMPLETE_ENDINGS):
+        return True
+    if "吗" in compact or "呢" in compact:
+        return True
+    return False
+
+
+def looks_complete_rest(compact: str) -> bool:
+    if len(compact) >= 5 and compact.endswith(_COMPLETE_ENDINGS):
+        return True
+    return "吗" in compact or "呢" in compact
+
+
+class SpeechCatcher:
+    """Hold Vosk finals until silence so '今天' + '几号了' become one turn."""
+
+    def __init__(self, hold_s: float = 0.9, now=time.monotonic) -> None:
+        self.hold_s = max(0.15, float(hold_s))
+        self._now = now
+        self.parts: List[str] = []
+        self.partial = ""
+        self.last_voice = 0.0
+        self.flush_now = False
+
+    def _joined(self) -> str:
+        return join_speech(*self.parts, self.partial)
+
+    def note_partial(self, text: str) -> str:
+        self.partial = (text or "").strip()
+        if self.partial:
+            self.last_voice = self._now()
+            self.flush_now = False
+        return self._joined()
+
+    def note_final(self, text: str) -> str:
+        self.partial = ""
+        joined = join_speech(*self.parts, text)
+        self.parts = [joined] if joined else []
+        self.last_voice = self._now()
+        self.flush_now = bool(joined) and looks_complete_utterance(joined)
+        return joined
+
+    def pending(self) -> str:
+        return self._joined()
+
+    def take_ready(self) -> str:
+        joined = self._joined()
+        if not joined:
+            return ""
+        wait = self.hold_s
+        compact = _compact_speech(joined)
+        if not self.flush_now and len(compact) < 5:
+            wait = max(self.hold_s, 1.6)
+        if not self.flush_now and (self._now() - self.last_voice) < wait:
+            return ""
+        self.parts = []
+        self.partial = ""
+        self.flush_now = False
+        return joined
+
+
+def drain_queue(out_q: "queue.Queue[str]") -> None:
+    while True:
+        try:
+            out_q.get_nowait()
+        except queue.Empty:
+            break
+
+
 def resolve_feeling(name: str) -> str:
     """Map express() feeling, including 同意/不同意, onto a recording."""
     raw = (name or "").strip()
@@ -414,6 +539,7 @@ CURSOR_LAMP_INSTRUCTIONS = """你是书桌上的智能灯 LeLamp。用简体中�
 - 开心 → feeling=开心；难过 → feeling=难过
 
 不要等用户说出「点头」「摇头」才动。用户在聊天、提问、征求意见时，根据你是否赞同来点头或摇头。
+若用户话明显没说完（两三个字、没有问号），只回「嗯」，不要追问「后面呢」。
 set_mood：只改灯（暖光、冷光、关灯、开灯、亮一点、暗一点）。
 set_rgb：用户说了具体颜色时用。
 """
@@ -860,9 +986,10 @@ def vosk_listen_worker(
         rec = vosk.KaldiRecognizer(model, 16000)
         rec.SetWords(True)
         index = find_input_device(device)
+        frames = 2000  # 125ms @ 16kHz — 8000 (500ms) made endpointing lag and cut off
         with sd.RawInputStream(
             samplerate=16000,
-            blocksize=8000,
+            blocksize=frames,
             device=index,
             dtype="int16",
             channels=1,
@@ -870,7 +997,7 @@ def vosk_listen_worker(
             out_q.put("__ready__")
             last_partial = ""
             while not stop.is_set():
-                data, _overflow = stream.read(8000)
+                data, _overflow = stream.read(frames)
                 chunk = bytes(data)
                 if rec.AcceptWaveform(chunk):
                     payload = json.loads(rec.Result())
@@ -907,11 +1034,17 @@ def apply_speech(
     lamp: LocalLamp,
     transcript: str,
     brain: Optional[CursorLampSession] = None,
+    *,
+    listen_mode: bool = False,
 ) -> str:
     print(f"灯< {transcript}")
+    compact = _compact_speech(transcript)
+    if listen_mode and compact in {"你好", "您好", "hello", "hi"}:
+        utter(lamp, "我在。")
+        return "ack"
     phrase = direct_spoken_command(transcript)
     if phrase:
-        if phrase != _compact_speech(transcript):
+        if phrase != compact:
             print(f"听成：{phrase}")
         return dispatch_text(lamp, phrase, brain)
     if brain is not None:
@@ -929,6 +1062,9 @@ def run_listen_loop(
     device: Optional[int],
     model_path: Path,
     brain: Optional[CursorLampSession] = None,
+    wake_word: bool = True,
+    hold_s: float = 0.9,
+    session_s: float = 45.0,
 ) -> int:
     stop = threading.Event()
     out_q: "queue.Queue[str]" = queue.Queue()
@@ -938,25 +1074,60 @@ def run_listen_loop(
         daemon=True,
     )
     worker.start()
-    print("麦克风线程已开。短指令（关灯、点头）立刻做；完整的话交给大模型，同意点头、不同意摇头。打字回车也可以。")
+    catcher = SpeechCatcher(hold_s=hold_s)
+    awake_until = 0.0
+    if wake_word:
+        print("麦克风已开。先说「你好台灯」，等我说「我在」再讲完整的一句。")
+        print("关灯、点头、暖光这些短指令不用说唤醒词。打字回车也可以。")
+    else:
+        print("麦克风已开（无唤醒词）。说完整一句再停。短指令立刻做。")
     try:
         while True:
             try:
-                item = out_q.get(timeout=0.1)
+                item = out_q.get(timeout=0.08)
             except queue.Empty:
                 item = None
             if item == "__ready__":
-                print("麦克风好了，请说话。")
-            elif item and item.startswith("__partial__ "):
-                print(f"\r听… {item[len('__partial__ '):]}", end="", flush=True)
+                print("麦克风好了。")
             elif item and item.startswith("__error__ "):
                 print()
                 print(item[len("__error__ "):])
                 return 1
+            elif item and item.startswith("__partial__ "):
+                shown = catcher.note_partial(item[len("__partial__ "):])
+                print(f"\r听… {shown}          ", end="", flush=True)
             elif item:
+                shown = catcher.note_final(item)
+                print(f"\r听… {shown}          ", end="", flush=True)
+
+            ready = catcher.take_ready()
+            if ready:
                 print()
-                if apply_speech(lamp, item, brain) == "quit":
-                    return 0
+                hit_wake, rest = split_wake(ready)
+                if hit_wake:
+                    awake_until = time.monotonic() + session_s
+                    utter(lamp, "我在。")
+                    drain_queue(out_q)
+                    ready = rest
+                if ready:
+                    local = direct_spoken_command(ready)
+                    chatting = (not wake_word) or (time.monotonic() < awake_until)
+                    if local:
+                        if apply_speech(lamp, ready, brain, listen_mode=True) == "quit":
+                            return 0
+                        drain_queue(out_q)
+                        if chatting:
+                            awake_until = time.monotonic() + session_s
+                    elif chatting:
+                        if len(_compact_speech(ready)) < 4:
+                            print(f"（太短，没交给模型：{ready}）")
+                        elif apply_speech(lamp, ready, brain, listen_mode=True) == "quit":
+                            return 0
+                        else:
+                            drain_queue(out_q)
+                            awake_until = time.monotonic() + session_s
+                    else:
+                        print("先说「你好台灯」，再说完整的一句。")
             if select.select([sys.stdin], [], [], 0)[0]:
                 line = sys.stdin.readline()
                 if line == "":
@@ -1169,7 +1340,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--id", dest="lamp_id", default=os.environ.get("LELAMP_ID", "lelamp"))
     parser.add_argument("--led-count", type=int, default=int(os.environ.get("LELAMP_LED_COUNT", "64")))
     parser.add_argument("--no-wake", action="store_true", help="skip wake_up on start")
-    parser.add_argument("--listen", action="store_true", help="Stage 2: Vosk keywords on the mic")
+    parser.add_argument("--listen", action="store_true", help="Stage 2: Vosk on the mic; say 你好台灯 first")
+    parser.add_argument("--no-wake-word", action="store_true", help="listen without the 你好台灯 gate")
+    parser.add_argument(
+        "--listen-hold",
+        type=float,
+        default=float(os.environ.get("LELAMP_LISTEN_HOLD", "0.9")),
+        help="seconds of silence before a sentence is committed (default 0.9)",
+    )
     parser.add_argument("--download-vosk", action="store_true", help="download offline Chinese Vosk model")
     parser.add_argument("--say", action="append", default=[], help="inject a spoken phrase (repeatable)")
     parser.add_argument("--speak", action="append", default=[], help="Stage 4: speak this sentence on the speaker")
@@ -1237,6 +1415,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 device=args.device,
                 model_path=Path(model_path),
                 brain=brain,
+                wake_word=not args.no_wake_word,
+                hold_s=args.listen_hold,
             )
         while True:
             try:

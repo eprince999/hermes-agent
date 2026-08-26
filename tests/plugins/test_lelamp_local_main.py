@@ -6,14 +6,18 @@ from pathlib import Path
 
 from plugins.lelamp.local_main import (
     LocalLamp,
+    SpeechCatcher,
     apply_speech,
     cursor_api_key,
     direct_spoken_command,
     execute_lamp_tool,
     extract_spoken_command,
+    join_speech,
+    looks_complete_utterance,
     parse_line,
     resolve_feeling,
     speak_text,
+    split_wake,
 )
 
 
@@ -250,6 +254,70 @@ def test_short_keyword_speech_stays_local():
 
     apply_speech(lamp, "点头", Brain())
     assert lamp.last_expression == "nod"
+
+
+def test_join_speech_glues_vosk_fragments():
+    assert join_speech("今天", "几号 了") == "今天几号了"
+    assert join_speech("把你", "把你差了吧") == "把你差了吧"
+    assert join_speech("今天几号了") == "今天几号了"
+
+
+def test_split_wake_and_complete_utterance():
+    assert split_wake("你好台灯") == (True, "")
+    assert split_wake("你好台灯今天几号了") == (True, "今天几号了")
+    assert split_wake("关灯") == (False, "关灯")
+    assert looks_complete_utterance("关灯") is True
+    assert looks_complete_utterance("今天") is False
+    assert looks_complete_utterance("今天几号了") is True
+    assert looks_complete_utterance("暖光看书更舒服你同意吗") is True
+
+
+def test_speech_catcher_waits_then_merges():
+    class Clock:
+        def __init__(self):
+            self.t = 0.0
+
+        def __call__(self):
+            return self.t
+
+    clock = Clock()
+    catcher = SpeechCatcher(hold_s=0.9, now=clock)
+    catcher.note_final("今天")
+    assert catcher.take_ready() == ""
+    clock.t = 0.5
+    assert catcher.take_ready() == ""
+    catcher.note_final("几号了")
+    assert catcher.take_ready() == "今天几号了"
+
+
+def test_speech_catcher_flushes_local_command_immediately():
+    class Clock:
+        def __init__(self):
+            self.t = 0.0
+
+        def __call__(self):
+            return self.t
+
+    catcher = SpeechCatcher(hold_s=2.0, now=Clock())
+    catcher.note_final("关灯")
+    assert catcher.take_ready() == "关灯"
+
+
+def test_listen_hello_does_not_replay_wake_up():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+
+    class Brain:
+        def ask(self, text):
+            raise AssertionError("listen 你好 should not call Cursor")
+
+    apply_speech(lamp, "你好", Brain(), listen_mode=True)
+    assert lamp.last_expression != "wake_up"
 
 
 def test_show_stage_prints_current_stage(capsys):
