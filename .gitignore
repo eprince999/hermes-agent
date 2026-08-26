@@ -141,6 +141,9 @@ apps/desktop/demo/
 # LeLamp Pi-side snapshots (created by local_main.py --snapshot)
 plugins/lelamp/lamp_snapshots/
 
+# LeLamp generated beat loops (written next to local_main.py on the Pi)
+plugins/lelamp/music/
+
 # LeLamp downloaded speech models (fetch on the Pi with --download-vosk / --download-piper)
 plugins/lelamp/models/*.onnx
 plugins/lelamp/models/*.onnx.json

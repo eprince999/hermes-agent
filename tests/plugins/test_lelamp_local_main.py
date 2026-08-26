@@ -12,6 +12,7 @@ from plugins.lelamp.local_main import (
     apply_speech,
     cursor_api_key,
     direct_spoken_command,
+    ensure_builtin_music,
     execute_lamp_tool,
     extract_spoken_command,
     hardware_spoken_command,
@@ -27,6 +28,8 @@ from plugins.lelamp.local_main import (
     split_wake,
     utterance_too_short,
     wake_ack,
+    write_beat_wav,
+    _BUILTIN_TRACKS,
 )
 
 
@@ -369,13 +372,13 @@ def test_show_stage_prints_current_stage(capsys):
     assert out.startswith(str(local_main.AGENT_STAGE))
 
 
-def test_snapshot_saves_stage2_copy(tmp_path, capsys):
+def test_snapshot_saves_current_stage_copy(tmp_path, capsys):
     from plugins.lelamp import local_main
 
-    dest = local_main.snapshot_current("stage3", dest_dir=tmp_path)
-    assert dest.name == "stage3.py"
+    dest = local_main.snapshot_current(dest_dir=tmp_path)
+    assert dest.name == f"stage{local_main.AGENT_STAGE}.py"
     assert dest.is_file()
-    assert "AGENT_STAGE = 3" in dest.read_text(encoding="utf-8")
+    assert f"AGENT_STAGE = {local_main.AGENT_STAGE}" in dest.read_text(encoding="utf-8")
     assert "saved snapshot" in capsys.readouterr().out
     args = local_main.build_parser().parse_args(["--snapshot"])
     assert args.snapshot == ""
@@ -570,7 +573,7 @@ def test_main_sim_speak_without_cursor(capsys):
 
     assert local_main.main(["--sim", "--no-wake", "--speak", "Hey. I'm here with you."]) == 0
     out = capsys.readouterr().out
-    assert "stage 3" in out
+    assert f"stage {local_main.AGENT_STAGE}" in out
     assert "[sim] speak Hey. I'm here with you." in out
     assert "desk commands" in out
 
@@ -987,3 +990,55 @@ def test_main_sim_snap(capsys):
     out = capsys.readouterr().out
     assert "[sim] camera snap" in out
     assert "camera=sim" in out
+
+
+def test_music_command_is_local_hardware(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("LELAMP_MUSIC_DIR", str(tmp_path))
+    assert parse_line("music").kind == "music"
+    assert parse_line("dance").kind == "music"
+    assert parse_line("play music").kind == "music"
+    assert parse_line("stop music").kind == "music_stop"
+    assert parse_line("turn off the music").kind == "music_stop"
+    assert parse_line("放音乐").kind == "music"
+    assert hardware_spoken_command("music") == "music"
+    assert hardware_spoken_command("please play music") == "play music"
+    assert hardware_spoken_command("stop music") == "stop music"
+    assert hardware_spoken_command("nod") is None
+
+    for name, bpm, notes in _BUILTIN_TRACKS:
+        write_beat_wav(tmp_path / name, bpm=bpm, notes=notes, seconds=0.4)
+    paths = ensure_builtin_music(tmp_path)
+    assert paths
+    assert all(path.is_file() and path.stat().st_size > 2000 for path in paths)
+
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    out = lamp.apply(parse_line("music"))
+    assert out.startswith("music ")
+    assert lamp.last_music.endswith(".wav")
+    assert lamp.last_expression == "happy_wiggle"
+    assert lamp.music_playing is True
+    printed = capsys.readouterr().out
+    assert "music " in printed
+    assert "bpm=" in printed
+
+    seen = []
+
+    class Brain:
+        def ask(self, text):
+            seen.append(text)
+            return "nope"
+
+    assert apply_speech(lamp, "music", Brain()) == "music"
+    assert apply_speech(lamp, "how are you", Brain()) == "busy"
+    assert seen == []
+    assert lamp.music_playing is True
+
+    assert apply_speech(lamp, "stop music", Brain()) == "music_stop"
+    assert lamp.music_playing is False
+    assert seen == []
