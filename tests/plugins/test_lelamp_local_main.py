@@ -33,11 +33,11 @@ def test_local_main_does_not_import_openai_or_livekit():
     assert "realtimemodel" not in lowered
 
 
-def test_stage2_keeps_chinese_vosk():
+def test_stage3_keeps_chinese_vosk():
     source = _source()
     from plugins.lelamp import local_main
 
-    assert local_main.AGENT_STAGE == 2
+    assert local_main.AGENT_STAGE == 3
     assert local_main.VOSK_MODEL_NAME == "vosk-model-small-cn-0.22"
     assert "vosk-model-small-en" not in source
 
@@ -141,18 +141,18 @@ def test_show_stage_prints_current_stage(capsys):
     assert out.startswith(str(local_main.AGENT_STAGE))
 
 
-def test_snapshot_saves_stage2_copy(tmp_path, capsys):
+def test_snapshot_saves_stage3_copy(tmp_path, capsys):
     from plugins.lelamp import local_main
 
-    dest = local_main.snapshot_current("stage2", dest_dir=tmp_path)
-    assert dest.name == "stage2.py"
+    dest = local_main.snapshot_current("stage3", dest_dir=tmp_path)
+    assert dest.name == "stage3.py"
     assert dest.is_file()
-    assert "AGENT_STAGE = 2" in dest.read_text(encoding="utf-8")
+    assert "AGENT_STAGE = 3" in dest.read_text(encoding="utf-8")
     assert "saved snapshot" in capsys.readouterr().out
     args = local_main.build_parser().parse_args(["--snapshot"])
     assert args.snapshot == ""
-    args = local_main.build_parser().parse_args(["--snapshot", "stage2"])
-    assert args.snapshot == "stage2"
+    args = local_main.build_parser().parse_args(["--snapshot", "stage3"])
+    assert args.snapshot == "stage3"
 
 
 def test_tracked_stage2_archive_has_no_music_player():
@@ -166,7 +166,10 @@ def test_tracked_stage2_archive_has_no_music_player():
     assert "AGENT_STAGE = 2" in stage2
     assert "vosk-model-small-cn-0.22" in stage2
     assert "def play_music" not in stage2
-    assert not (root / "stage3.py").is_file()
+    stage3 = (root / "stage3.py").read_text(encoding="utf-8")
+    assert "AGENT_STAGE = 3" in stage3
+    assert "def play_music" in stage3
+    assert "vosk-model-small-cn-0.22" in stage3
     assert not (root / "stage4.py").is_file()
 
 
