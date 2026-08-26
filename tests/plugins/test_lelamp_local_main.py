@@ -1,10 +1,21 @@
-"""Stage 1 local lamp: keyboard commands, no OpenAI/LiveKit."""
+"""Stage 2 local lamp: Chinese Vosk keywords plus a music folder."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from plugins.lelamp.local_main import LocalLamp, extract_spoken_command, parse_line
+from plugins.lelamp.local_main import (
+    LocalLamp,
+    apply_speech,
+    ensure_builtin_music,
+    ensure_music_dir,
+    extract_spoken_command,
+    list_music_files,
+    parse_line,
+    pick_random_track,
+    write_beat_wav,
+    _BUILTIN_TRACKS,
+)
 
 
 def _source() -> str:
@@ -20,6 +31,15 @@ def test_local_main_does_not_import_openai_or_livekit():
     assert "import openai" not in lowered
     assert "plugins.openai" not in lowered
     assert "realtimemodel" not in lowered
+
+
+def test_stage2_keeps_chinese_vosk():
+    source = _source()
+    from plugins.lelamp import local_main
+
+    assert local_main.AGENT_STAGE == 2
+    assert local_main.VOSK_MODEL_NAME == "vosk-model-small-cn-0.22"
+    assert "vosk-model-small-en" not in source
 
 
 def test_hello_is_wake_up_not_a_light_command():
@@ -42,12 +62,11 @@ def test_on_uses_circadian_auto():
 
 def test_quit_and_unknown():
     assert parse_line("q").kind == "quit"
-    unknown = parse_line("跳个舞")
+    unknown = parse_line("今天天气怎么样")
     assert unknown.kind == "unknown"
 
 
 def test_brightness_and_rgb_parse():
-    assert parse_line("亮一点") == parse_line("亮一点")
     delta = parse_line("亮一点")
     assert delta.kind == "brightness_delta"
     assert delta.payload == 15
@@ -83,6 +102,7 @@ def test_main_sim_scripted_session(monkeypatch, capsys):
     assert "好的。" in out
     assert "expression=nod" in out
     assert "好，我先歇着。" in out
+    assert "music 文件夹" in out
 
 
 def test_extract_spoken_command_from_padded_asr():
@@ -90,18 +110,8 @@ def test_extract_spoken_command_from_padded_asr():
     assert extract_spoken_command("你 好 呀") == "你好"
     assert extract_spoken_command("今天天气怎么样") is None
     assert extract_spoken_command("不要关灯") == "不要"
-
-
-def test_stage2_uses_chinese_vosk_not_english_or_music():
-    source = _source()
-    from plugins.lelamp import local_main
-
-    assert local_main.AGENT_STAGE == 2
-    assert local_main.VOSK_MODEL_NAME == "vosk-model-small-cn-0.22"
-    assert "vosk-model-small-en" not in source
-    assert "MUSIC_START" not in source
-    assert "play_music" not in source
-    assert "def dance" not in source
+    assert extract_spoken_command("请点头") == "点头"
+    assert extract_spoken_command("放音乐吧") == "放音乐"
 
 
 def test_show_stage_prints_current_stage(capsys):
@@ -127,6 +137,21 @@ def test_snapshot_saves_stage2_copy(tmp_path, capsys):
     assert args.snapshot == "stage2"
 
 
+def test_tracked_stage2_archive_has_no_music_player():
+    root = (
+        Path(__file__).resolve().parents[2]
+        / "plugins"
+        / "lelamp"
+        / "lamp_snapshots"
+    )
+    stage2 = (root / "stage2.py").read_text(encoding="utf-8")
+    assert "AGENT_STAGE = 2" in stage2
+    assert "vosk-model-small-cn-0.22" in stage2
+    assert "def play_music" not in stage2
+    assert not (root / "stage3.py").is_file()
+    assert not (root / "stage4.py").is_file()
+
+
 def test_main_sim_say_phrases_without_repl(capsys):
     from plugins.lelamp import local_main
 
@@ -135,3 +160,52 @@ def test_main_sim_say_phrases_without_repl(capsys):
     assert "play nod" in out
     assert "rgb (0, 0, 0)" in out
     assert "关灯。" in out
+
+
+def test_music_command_plays_from_folder(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("LELAMP_MUSIC_DIR", str(tmp_path))
+    assert parse_line("音乐").kind == "music"
+    assert parse_line("放音乐").kind == "music"
+    assert parse_line("停止音乐").kind == "music_stop"
+    assert extract_spoken_command("请放音乐") == "放音乐"
+
+    song = tmp_path / "desk_tune_96.wav"
+    write_beat_wav(song, bpm=96, notes=(0, 4, 7), seconds=0.3)
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    out = lamp.apply(parse_line("音乐"))
+    assert out.startswith("music ")
+    assert lamp.last_music == "desk_tune_96.wav"
+    assert lamp.last_expression == "happy_wiggle"
+    assert lamp.music_playing is True
+    printed = capsys.readouterr().out
+    assert "bpm=" in printed
+
+    assert apply_speech(lamp, "今天天气") == "busy"
+    assert apply_speech(lamp, "停止音乐") == "music_stop"
+    assert lamp.music_playing is False
+
+
+def test_music_folder_plays_user_files_not_builtins(tmp_path, monkeypatch):
+    monkeypatch.setenv("LELAMP_MUSIC_DIR", str(tmp_path))
+    folder = ensure_music_dir()
+    assert folder == tmp_path
+    song = tmp_path / "desk_tune_96.wav"
+    write_beat_wav(song, bpm=96, notes=(0, 4, 7), seconds=0.3)
+    ensure_builtin_music(tmp_path / ".builtin")
+    assert list_music_files(tmp_path) == [song]
+    path, bpm = pick_random_track()
+    assert path == song
+    assert bpm == 96
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    fallback, _bpm = pick_random_track(empty)
+    assert fallback.parent.name == ".builtin"
+    assert list_music_files(empty) == []
+    assert _BUILTIN_TRACKS

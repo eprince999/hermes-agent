@@ -44,11 +44,13 @@ LeLamp is a 5V lamp. Use the 5V 2A supplies from the assembly guide.
 
 If the lamp is already assembled, copy `plugins/lelamp/local_main.py` to `~/lelamp_runtime/local_main.py`.
 
-Keep the runnable name `local_main.py`. Snapshot 2 (Chinese Vosk keywords) is archived at `plugins/lelamp/lamp_snapshots/stage2.py` and is byte-identical to the runnable file. Copy that snapshot back over `local_main.py` to roll back. Do not invent `local_main_v2.py` as the launcher. Stages 3 and 4 (English Cursor / music) were deleted.
+Keep the runnable name `local_main.py`. Snapshot 2 (Chinese Vosk keywords only) is archived at `plugins/lelamp/lamp_snapshots/stage2.py`. The runnable file is snapshot 2 plus a `music/` folder. Copy the snapshot back over `local_main.py` to roll back. Do not invent `local_main_v2.py` as the launcher. Stages 3 and 4 (English Cursor) stay deleted.
 
 Stage 1 (keyboard, no cloud): `sudo uv run python local_main.py`. Type `你好` / `点头` / `暖光` / `关灯`. `--sim` prints actions without servos.
 
-Stage 2 (ReSpeaker, Chinese Vosk): `uv add vosk`, then `sudo uv run python local_main.py --download-vosk`, then `sudo uv run python local_main.py --listen`. Speak **你好**、**点头**、**关灯**. Mapping without a mic: `--say 请关灯`. `--show-stage` starts with `2`.
+Stage 2 (ReSpeaker, Chinese Vosk): `uv add vosk`, then `sudo uv run python local_main.py --download-vosk`, then `sudo uv run python local_main.py --listen`. Speak **你好**、**点头**、**关灯**、**音乐**. Mapping without a mic: `--say 请关灯`. `--show-stage` starts with `2`.
+
+Music: startup creates `~/lelamp_runtime/music/`. Drop wav/mp3/ogg there. Say **音乐** / **放音乐** to play a random file; **停止音乐** to stop. An empty folder falls back to short builtin beats in `music/.builtin/`.
 
 The LiveKit + OpenAI Realtime path is optional later: copy `plugins/lelamp/runtime_main.py` over `~/lelamp_runtime/main.py`, put `OPENAI_API_KEY` in `.env`, then `sudo uv run main.py console`.
 
@@ -101,6 +103,7 @@ Official recordings: `wake_up`, `nod`, `headshake`, `curious`, `scanning`, `exci
 - Pi Zero 2W cannot run the LLM locally. `main.py` uses OpenAI Realtime in the cloud; the Pi only does mic, speaker, servos, and LEDs. Put `OPENAI_API_KEY` in `~/lelamp_runtime/.env`. `sudo` drops shell exports; a missing key crashes at `RealtimeModel`.
 - One Raspberry Pi should run only this lamp's runtime while you talk to it.
 - Stage 2 speech uses offline Chinese Vosk (`vosk-model-small-cn-0.22`), not OpenAI and not the English model. Speak one short command and pause. Filler like `嗯` maps to nod.
+- Cloud Agents cannot move Pi GPIO. Drop songs into `~/lelamp_runtime/music/` on the Pi itself.
 
 ## Verification
 
