@@ -18,6 +18,8 @@ Keep official ``main.py`` untouched. From the runtime repo root:
     sudo uv run python local_main.py --say 你好 --say 关灯
     sudo uv run python local_main.py --download-vosk
     sudo uv run python local_main.py --listen
+    sudo uv run python local_main.py --snapshot          # save as lamp_snapshots/stage2.py
+    sudo uv run python local_main.py --snapshot stage2
 
 Type Chinese commands, or with ``--listen`` speak them to the ReSpeaker.
 ``q`` or Ctrl+C quits.
@@ -36,6 +38,7 @@ import json
 import os
 import queue
 import select
+import shutil
 import sys
 import threading
 import zipfile
@@ -48,6 +51,22 @@ from urllib.request import urlretrieve
 # Bump when a stage lands. Printed at startup so a snapshot is identifiable.
 AGENT_STAGE = 2
 AGENT_LABEL = "keyboard + vosk listen"
+
+
+def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = None) -> Path:
+    """Copy this file into lamp_snapshots/. Default name is stage{N}.py."""
+    folder = dest_dir or (Path(__file__).resolve().parent / "lamp_snapshots")
+    folder.mkdir(parents=True, exist_ok=True)
+    raw = (name or "").strip() or f"stage{AGENT_STAGE}"
+    slug = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in raw).strip("-_")
+    if not slug:
+        slug = f"stage{AGENT_STAGE}"
+    if not slug.endswith(".py"):
+        slug += ".py"
+    dest = folder / slug
+    shutil.copy2(Path(__file__).resolve(), dest)
+    print(f"saved snapshot {dest}")
+    return dest
 
 RECORDINGS = (
     "curious",
@@ -619,6 +638,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", type=int, default=None, help="sounddevice input index")
     parser.add_argument("--model", type=Path, default=None, help="path to vosk-model-small-cn-0.22")
     parser.add_argument("--show-stage", action="store_true", help="print stage number and exit")
+    parser.add_argument(
+        "--snapshot",
+        nargs="?",
+        const="",
+        metavar="NAME",
+        help="copy this file to lamp_snapshots/NAME.py (default stageN.py) and exit",
+    )
     return parser
 
 
@@ -626,6 +652,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     if args.show_stage:
         print(f"{AGENT_STAGE} {AGENT_LABEL}")
+        return 0
+    if args.snapshot is not None:
+        snapshot_current(args.snapshot)
         return 0
     print(f"local_main  stage {AGENT_STAGE}  ({AGENT_LABEL})")
     if args.download_vosk:

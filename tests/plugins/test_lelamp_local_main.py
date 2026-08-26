@@ -101,6 +101,20 @@ def test_show_stage_prints_current_stage(capsys):
     assert out.startswith(str(local_main.AGENT_STAGE))
 
 
+def test_snapshot_saves_stage2_copy(tmp_path, capsys):
+    from plugins.lelamp import local_main
+
+    dest = local_main.snapshot_current("stage2", dest_dir=tmp_path)
+    assert dest.name == "stage2.py"
+    assert dest.is_file()
+    assert "AGENT_STAGE = 2" in dest.read_text(encoding="utf-8")
+    assert "saved snapshot" in capsys.readouterr().out
+    args = local_main.build_parser().parse_args(["--snapshot"])
+    assert args.snapshot == ""
+    args = local_main.build_parser().parse_args(["--snapshot", "stage2"])
+    assert args.snapshot == "stage2"
+
+
 def test_main_sim_say_phrases_without_repl(capsys):
     from plugins.lelamp import local_main
 

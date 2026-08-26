@@ -44,7 +44,7 @@ LeLamp is a 5V lamp. Use the 5V 2A supplies from the assembly guide.
 
 If the lamp is already assembled, copy `plugins/lelamp/local_main.py` to `~/lelamp_runtime/local_main.py`.
 
-Keep the runnable name `local_main.py`. After a stage works, copy it to `lamp_snapshots/` or `git commit` it; rollback by copying that snapshot back. Do not invent `local_main_v2.py` as the launcher.
+Keep the runnable name `local_main.py`. After a stage works, run `sudo uv run python local_main.py --snapshot` (saves `lamp_snapshots/stage2.py`) or copy the file yourself. Rollback by copying that snapshot back. Do not invent `local_main_v2.py` as the launcher.
 
 Stage 1 (keyboard, no cloud): `sudo uv run python local_main.py`. Type `你好` / `点头` / `暖光` / `关灯`. `--sim` prints actions without servos.
 
