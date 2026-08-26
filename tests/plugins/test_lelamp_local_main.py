@@ -81,7 +81,7 @@ def test_sim_express_then_off_updates_state():
         led_count=64,
         brightness=70,
     )
-    assert "Hi there" in lamp.apply(parse_line("hello"))
+    assert "Hey. I'm here with you." in lamp.apply(parse_line("hello"))
     assert lamp.last_expression == "wake_up"
     assert lamp.last_rgb != (0, 0, 0)
     lamp.apply(parse_line("lights off"))
@@ -178,9 +178,9 @@ def test_main_sim_scripted_session(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
     assert local_main.main(["--sim", "--no-wake"]) == 0
     out = capsys.readouterr().out
-    assert "Sure, that works for me." in out
+    assert "Yeah, I think so too." in out
     assert "expression=nod" in out
-    assert "I'll be here if you need me." in out
+    assert "Okay. I'll be right here." in out
 
 
 def test_extract_spoken_command_from_padded_asr():
@@ -322,7 +322,7 @@ def test_listen_hello_does_not_replay_wake_up():
 
     apply_speech(lamp, "hello", Brain(), listen_mode=True)
     assert lamp.last_expression != "wake_up"
-    assert lamp.last_spoken == "I'm right here."
+    assert lamp.last_spoken == "I'm here. Go ahead."
 
 
 def test_show_stage_prints_current_stage(capsys):
@@ -387,7 +387,7 @@ def test_execute_lamp_tool_moves_and_lights():
         led_count=64,
         brightness=70,
     )
-    assert "Sure, that works for me." in execute_lamp_tool(lamp, "express", {"feeling": "nod"})
+    assert "Yeah, I think so too." in execute_lamp_tool(lamp, "express", {"feeling": "nod"})
     assert lamp.last_expression == "nod"
     execute_lamp_tool(lamp, "set_mood", {"mood": "lights off"})
     assert lamp.last_rgb == (0, 0, 0)
@@ -433,8 +433,8 @@ def test_espeak_amplitude_is_loud():
 
 
 def test_speak_text_sim_prints(capsys):
-    assert speak_text("Hi there. I'm your lamp.", sim=True) == "sim"
-    assert "[sim] speak Hi there. I'm your lamp." in capsys.readouterr().out
+    assert speak_text("Hey. I'm here with you.", sim=True) == "sim"
+    assert "[sim] speak Hey. I'm here with you." in capsys.readouterr().out
     assert speak_text("ignore me", sim=True, enabled=False) == ""
 
 
@@ -488,10 +488,10 @@ def test_espeak_english_voice(monkeypatch):
 def test_main_sim_speak_without_cursor(capsys):
     from plugins.lelamp import local_main
 
-    assert local_main.main(["--sim", "--no-wake", "--speak", "Hi there. I'm your lamp."]) == 0
+    assert local_main.main(["--sim", "--no-wake", "--speak", "Hey. I'm here with you."]) == 0
     out = capsys.readouterr().out
     assert "stage 3" in out
-    assert "[sim] speak Hi there. I'm your lamp." in out
+    assert "[sim] speak Hey. I'm here with you." in out
 
 
 def test_english_keywords_parse_and_reply():
@@ -510,7 +510,7 @@ def test_english_keywords_parse_and_reply():
         led_count=64,
         brightness=70,
     )
-    assert "Sure, that works for me." in lamp.apply(parse_line("nod"))
+    assert "Yeah, I think so too." in lamp.apply(parse_line("nod"))
     lamp.apply(parse_line("lights off"))
     assert lamp.last_rgb == (0, 0, 0)
 
@@ -518,7 +518,7 @@ def test_english_keywords_parse_and_reply():
 def test_english_helpers():
     assert speech_lang("what day is it") == "en"
     assert speech_lang("q") == "en"
-    assert wake_ack("hello lamp") == "I'm right here."
+    assert wake_ack("hello lamp") == "I'm here. Go ahead."
     assert utterance_too_short("hi") is True
     assert utterance_too_short("what day is it") is False
     assert pick_asr(("final", "ah"), ("final", "what day is it"))[1] == "what day is it"
@@ -548,6 +548,8 @@ def test_download_vosk_flag_is_english():
     assert "English" in help_text
     args = build_parser().parse_args(["--download-vosk"])
     assert args.download_vosk is True
+    piper = build_parser().parse_args(["--download-piper"])
+    assert piper.download_piper is True
 
 
 def test_main_sim_speak_english(capsys):
@@ -557,3 +559,74 @@ def test_main_sim_speak_english(capsys):
     out = capsys.readouterr().out
     assert "[sim] speak hello I'm the lamp" in out
     assert "vosk(en)" in out
+
+
+def test_piper_model_path_uses_env_file(tmp_path, monkeypatch):
+    from plugins.lelamp import local_main
+
+    missing = tmp_path / "missing.onnx"
+    monkeypatch.setenv("LELAMP_PIPER_MODEL", str(missing))
+    assert local_main.piper_model_path() is None
+    model = tmp_path / "en_US-ryan-medium.onnx"
+    model.write_bytes(b"fake-onnx")
+    monkeypatch.setenv("LELAMP_PIPER_MODEL", str(model))
+    assert local_main.piper_model_path() == model
+
+
+def test_find_tts_engine_prefers_piper_when_model_exists(tmp_path, monkeypatch):
+    from plugins.lelamp import local_main
+
+    model = tmp_path / "en_US-ryan-medium.onnx"
+    model.write_bytes(b"fake-onnx")
+    monkeypatch.setenv("LELAMP_PIPER_MODEL", str(model))
+    monkeypatch.delenv("LELAMP_TTS", raising=False)
+    monkeypatch.setattr(local_main, "_piper_can_synth", lambda: True)
+    assert local_main.find_tts_engine() == "piper"
+
+
+def test_find_tts_engine_falls_back_to_espeak_without_piper(monkeypatch):
+    from plugins.lelamp import local_main
+
+    monkeypatch.delenv("LELAMP_TTS", raising=False)
+    monkeypatch.delenv("LELAMP_PIPER_MODEL", raising=False)
+    monkeypatch.setattr(local_main, "piper_model_path", lambda: None)
+
+    def fake_which(name):
+        if name == "espeak-ng":
+            return "/usr/bin/espeak-ng"
+        return None
+
+    monkeypatch.setattr(local_main.shutil, "which", fake_which)
+    monkeypatch.setattr(local_main, "_piper_can_synth", lambda: False)
+    assert local_main.find_tts_engine() == "espeak-ng"
+
+
+def test_download_piper_voice_fetches_onnx_and_json(tmp_path, monkeypatch):
+    from plugins.lelamp import local_main
+
+    dest = tmp_path / "en_US-ryan-medium.onnx"
+
+    def fake_fetch(url, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if str(path).endswith(".json"):
+            path.write_text('{"audio":{"sample_rate":22050}}', encoding="utf-8")
+        else:
+            path.write_bytes(b"x" * 1_500_000)
+
+    monkeypatch.setattr(local_main, "_fetch_url", fake_fetch)
+    got = local_main.download_piper_voice(dest)
+    assert got == dest
+    assert dest.is_file()
+    assert dest.stat().st_size > 1_000_000
+    assert Path(str(dest) + ".json").is_file()
+
+
+def test_speak_text_uses_piper_when_selected(monkeypatch, tmp_path):
+    from plugins.lelamp import local_main
+
+    model = tmp_path / "voice.onnx"
+    model.write_bytes(b"fake")
+    monkeypatch.setenv("LELAMP_TTS", "piper")
+    monkeypatch.setattr(local_main, "piper_model_path", lambda: model)
+    monkeypatch.setattr(local_main, "_speak_piper", lambda text: "piper")
+    assert speak_text("Hey. I'm here with you.", sim=False) == "piper"

@@ -48,9 +48,9 @@ Keep the runnable name `local_main.py`. After a stage works, run `sudo uv run py
 
 Stage 1 (keyboard, no cloud): `sudo uv run python local_main.py`. Type `hello` / `nod` / `warm` / `lights off`. `--sim` prints actions without servos.
 
-Stage 2 (ReSpeaker, English): `uv add vosk`, then `--download-vosk` (English small model) and `--listen`. Say **hello lamp**, wait for I'm right here, then one full sentence. Short commands (`lights off`, `nod`) skip the wake word. `--no-wake-word` opens the mic. Mapping without a mic: `--say "lights off"`.
+Stage 2 (ReSpeaker, English): `uv add vosk`, then `--download-vosk` (English small model) and `--listen`. Say **hello lamp**, wait until I say I'm here, then one full sentence. Short commands (`lights off`, `nod`) skip the wake word. `--no-wake-word` opens the mic. Mapping without a mic: `--say "lights off"`.
 
-Stage 3 (Cursor API + speaker): put `CURSOR_API_KEY=crsr_...` in `~/lelamp_runtime/.env` (key from https://cursor.com/dashboard/api). `uv add cursor-sdk`, `sudo apt install -y espeak-ng`, then `sudo uv run python local_main.py --sim --ask "Do you agree warm light is nicer?"`. Short keywords run locally. Full sentences go to Cursor (agree → nod, disagree → headshake). Replies play on the ReSpeaker in fluent English (`espeak-ng -v en-us`). `--speak "Hi there. I'm your lamp."` tests the speaker. `--no-speak` prints only. This is cursor-sdk, not a DeepSeek/OpenAI chat URL.
+Stage 3 (Cursor API + speaker): put `CURSOR_API_KEY=crsr_...` in `~/lelamp_runtime/.env` (key from https://cursor.com/dashboard/api). `uv add cursor-sdk piper-tts`, then `sudo uv run python local_main.py --download-piper` (Ryan neural English — a person in the room, not espeak). `espeak-ng` is a robotic fallback only. Test with `sudo uv run python local_main.py --sim --ask "Do you agree warm light is nicer?"` and `--speak "Hey. I'm here with you."`. Short keywords run locally. Full sentences go to Cursor (agree → nod, disagree → headshake). `--no-speak` prints only. This is cursor-sdk, not a DeepSeek/OpenAI chat URL. Do not clone celebrity or TV voices; a recording of the user's own voice can be a later opt-in.
 
 The LiveKit + OpenAI Realtime path is optional later: copy `plugins/lelamp/runtime_main.py` over `~/lelamp_runtime/main.py`, put `OPENAI_API_KEY` in `.env`, then `sudo uv run main.py console`.
 

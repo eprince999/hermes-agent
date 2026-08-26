@@ -140,3 +140,9 @@ apps/desktop/demo/
 
 # LeLamp Pi-side snapshots (created by local_main.py --snapshot)
 plugins/lelamp/lamp_snapshots/
+
+# LeLamp downloaded speech models (fetch on the Pi with --download-vosk / --download-piper)
+plugins/lelamp/models/*.onnx
+plugins/lelamp/models/*.onnx.json
+plugins/lelamp/models/*.onnx.part
+plugins/lelamp/models/vosk-model-*/

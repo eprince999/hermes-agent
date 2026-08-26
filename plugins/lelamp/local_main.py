@@ -10,14 +10,16 @@ Keep official ``main.py`` untouched. From the runtime repo root:
 
     sudo uv run python local_main.py
     sudo uv run python local_main.py --listen
-    sudo uv run python local_main.py --speak "Hi there. I'm your lamp."
+    sudo uv run python local_main.py --speak "Hey. I'm here with you."
     sudo uv run python local_main.py --download-vosk
+    sudo uv run python local_main.py --download-piper
     sudo uv run python local_main.py --ask "Do you agree warm light is nicer?"
     sudo uv run python local_main.py --snapshot
 
 Stage 3 uses Cursor's official API (cursor-sdk + CURSOR_API_KEY from
 https://cursor.com/dashboard/api) and reads replies on the ReSpeaker
-with espeak-ng (or piper if LELAMP_PIPER_MODEL is set). No OpenAI TTS.
+with espeak-ng, or Piper neural TTS (``--download-piper``) which sounds
+like a person. No OpenAI TTS. Do not clone celebrity / TV voices.
 
 Roadmap:
   1. keyboard + motors + RGB
@@ -44,7 +46,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
-from urllib.request import urlretrieve
+from urllib.request import Request, urlopen, urlretrieve
 
 # Bump when a stage lands. Printed at startup so a snapshot is identifiable.
 AGENT_STAGE = 3
@@ -165,17 +167,17 @@ LIGHT_ONLY: Dict[str, str] = {
 }
 
 EXPRESSION_REPLIES: Dict[str, str] = {
-    "wake_up": "Hi there. I'm your lamp.",
-    "nod": "Sure, that works for me.",
-    "headshake": "I don't think so.",
-    "curious": "Hmm, I'm not sure I follow.",
-    "scanning": "Let me take a look.",
-    "excited": "Oh, I like that.",
+    "wake_up": "Hey. I'm here with you.",
+    "nod": "Yeah, I think so too.",
+    "headshake": "I'd rather not.",
+    "curious": "Tell me a bit more?",
+    "scanning": "I'm looking.",
+    "excited": "Oh, that's nice.",
     "happy_wiggle": "That makes me happy.",
-    "shock": "Whoa. Didn't see that coming.",
-    "shy": "That's a little embarrassing.",
-    "sad": "That's a bit sad.",
-    "idle": "I'll just sit here quietly.",
+    "shock": "Oh. I didn't expect that.",
+    "shy": "A little shy, if I'm honest.",
+    "sad": "I'm sorry. That sounds hard.",
+    "idle": "I'll stay right here.",
 }
 
 # Only for express(feeling=...), not for whole-utterance parse_line.
@@ -205,6 +207,7 @@ HELP_TEXT = """Stage 3 lamp (Cursor API + speaker, no OpenAI)
 Motion: hello / nod / shake / curious / happy / idle
 Light: lights on / lights off / warm / cool / brighter / dimmer
 Speaker: louder / quieter / volume 100; test: --speak hello
+Voice: Piper companion (ryan) after --download-piper; espeak is fallback only
 Talk: say hello lamp, then one full sentence.
       Agree → nod. Disagree → shake head.
 Other: status  rgb 255 176 80  help  q
@@ -214,6 +217,12 @@ VOSK_MODEL_NAME = "vosk-model-small-cn-0.22"
 VOSK_MODEL_URL = f"https://alphacephei.com/vosk/models/{VOSK_MODEL_NAME}.zip"
 VOSK_EN_MODEL_NAME = "vosk-model-small-en-us-0.15"
 VOSK_EN_MODEL_URL = f"https://alphacephei.com/vosk/models/{VOSK_EN_MODEL_NAME}.zip"
+PIPER_VOICE = "en_US-ryan-medium"
+PIPER_ONNX_URL = (
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/"
+    "en/en_US/ryan/medium/en_US-ryan-medium.onnx"
+)
+PIPER_JSON_URL = PIPER_ONNX_URL + ".json"
 
 
 @dataclass(frozen=True)
@@ -257,7 +266,7 @@ def spoken_for(recording: str, source: str) -> str:
 
 
 def wake_ack(transcript: str) -> str:
-    return "I'm right here."
+    return "I'm here. Go ahead."
 
 
 def utterance_too_short(text: str) -> bool:
@@ -285,7 +294,7 @@ def parse_line(line: str) -> Command:
 
     low = text.lower()
     if low in {"q", "quit", "exit", "bye", "goodbye"}:
-        return Command("quit", None, "Alright. I'll be here if you need me.")
+        return Command("quit", None, "Okay. I'll be right here.")
     if low in {"help", "h", "?"}:
         return Command("help", None, HELP_TEXT.strip())
     if low in {"status"}:
@@ -548,8 +557,8 @@ def resolve_feeling(name: str) -> str:
     raise ValueError(raw)
 
 
-CURSOR_LAMP_INSTRUCTIONS = """You are LeLamp, a slightly clumsy, warm desk lamp.
-Always reply in fluent, natural spoken English. Never use Chinese. Keep it to one or two short sentences, the way a person talks.
+CURSOR_LAMP_INSTRUCTIONS = """You are LeLamp, a calm companion who happens to be a desk lamp.
+Talk like a close friend in the room: warm, natural spoken English, one or two short sentences. Not a robot, not a call-center assistant, not a TV character. Never use Chinese.
 Control the body and light with tools. Never pretend you moved. Do not edit files or open a shell.
 
 Every reply MUST call express first, then talk:
@@ -576,17 +585,101 @@ def _bin(name: str) -> Optional[str]:
     return None
 
 
+def piper_models_dir() -> Path:
+    override = (os.environ.get("LELAMP_PIPER_DIR") or "").strip()
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parent / "models"
+
+
+def piper_model_path() -> Optional[Path]:
+    env = (os.environ.get("LELAMP_PIPER_MODEL") or "").strip()
+    if env:
+        path = Path(env)
+        return path if path.is_file() else None
+    onnx = piper_models_dir() / f"{PIPER_VOICE}.onnx"
+    return onnx if onnx.is_file() else None
+
+
+def _piper_can_synth() -> bool:
+    if _bin("piper"):
+        return True
+    try:
+        import piper  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _piper_cli() -> Optional[List[str]]:
+    found = _bin("piper")
+    if found:
+        return [found]
+    try:
+        import piper  # noqa: F401
+    except Exception:
+        return None
+    return [sys.executable, "-m", "piper"]
+
+
+def _fetch_url(url: str, dest: Path) -> None:
+    req = Request(url, headers={"User-Agent": "lelamp-local-main/3"})
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    with urlopen(req, timeout=180) as resp, open(tmp, "wb") as fh:
+        while True:
+            chunk = resp.read(256 * 1024)
+            if not chunk:
+                break
+            fh.write(chunk)
+    tmp.replace(dest)
+
+
+def download_piper_voice(dest: Optional[Path] = None) -> Path:
+    """Fetch the companion English voice (Ryan). Not a celebrity clone."""
+    target = dest or (piper_models_dir() / f"{PIPER_VOICE}.onnx")
+    json_path = Path(str(target) + ".json")
+    if target.is_file() and target.stat().st_size > 1_000_000 and json_path.is_file():
+        print(f"piper voice already at {target}")
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    print(f"downloading {PIPER_ONNX_URL}")
+    _fetch_url(PIPER_ONNX_URL, target)
+    print(f"downloading {PIPER_JSON_URL}")
+    _fetch_url(PIPER_JSON_URL, json_path)
+    if not target.is_file() or target.stat().st_size < 1_000_000:
+        raise RuntimeError(f"piper model missing or too small: {target}")
+    if not json_path.is_file():
+        raise RuntimeError(f"piper voice json missing: {json_path}")
+    print(f"piper voice ready at {target}")
+    return target
+
+
 def find_tts_engine() -> str:
     forced = (os.environ.get("LELAMP_TTS") or "").strip().lower()
     if forced:
         return forced
-    if _bin("piper") and (os.environ.get("LELAMP_PIPER_MODEL") or "").strip():
+    if piper_model_path() is not None and _piper_can_synth():
         return "piper"
     if _bin("espeak-ng"):
         return "espeak-ng"
     if _bin("espeak"):
         return "espeak"
     return "none"
+
+
+def describe_tts() -> str:
+    engine = find_tts_engine()
+    if engine == "piper":
+        return f"tts=piper  {PIPER_VOICE} (companion)"
+    if engine in {"espeak-ng", "espeak"}:
+        if piper_model_path() is None:
+            return (
+                "tts=espeak  robotic fallback; human voice: "
+                "uv add piper-tts && sudo uv run python local_main.py --download-piper"
+            )
+        return "tts=espeak  piper model is present but piper-tts is not installed (uv add piper-tts)"
+    return "tts=none  install piper-tts or espeak-ng"
 
 
 def _espeak_cmd(binary: str, text: str, volume: int, lang: str = "en") -> List[str]:
@@ -646,33 +739,81 @@ def _speak_espeak(text: str, volume: int) -> str:
     return "none"
 
 
+_PIPER_VOICE_OBJ = None
+
+
+def _piper_synth_python(text: str, model: Path, wav_path: str) -> bool:
+    global _PIPER_VOICE_OBJ
+    try:
+        from piper import PiperVoice
+    except Exception:
+        return False
+    try:
+        if _PIPER_VOICE_OBJ is None:
+            _PIPER_VOICE_OBJ = PiperVoice.load(str(model))
+        voice = _PIPER_VOICE_OBJ
+        import wave
+
+        syn_config = None
+        try:
+            from piper import SynthesisConfig
+
+            syn_config = SynthesisConfig(length_scale=1.08)
+        except Exception:
+            syn_config = None
+        with wave.open(wav_path, "wb") as wav_file:
+            if syn_config is not None:
+                voice.synthesize_wav(text, wav_file, syn_config=syn_config)
+            else:
+                voice.synthesize_wav(text, wav_file)
+        return Path(wav_path).is_file() and Path(wav_path).stat().st_size > 44
+    except Exception as exc:
+        print(f"piper python synth failed: {exc}")
+        return False
+
+
+def _piper_synth_cli(text: str, model: Path, wav_path: str) -> bool:
+    argv = _piper_cli()
+    if not argv:
+        return False
+    result = subprocess.run(
+        argv + ["--model", str(model), "--output_file", wav_path],
+        input=(text + "\n").encode("utf-8"),
+        timeout=90,
+        check=False,
+        capture_output=True,
+    )
+    return result.returncode == 0 and Path(wav_path).is_file() and Path(wav_path).stat().st_size > 44
+
+
+def _play_wav(path: str) -> bool:
+    for name, extra in (("aplay", ["-q"]), ("paplay", []), ("ffplay", ["-nodisp", "-autoexit", "-loglevel", "quiet"])):
+        binary = _bin(name)
+        if not binary:
+            continue
+        result = subprocess.run([binary, *extra, path], check=False, timeout=60, capture_output=True)
+        if result.returncode == 0:
+            return True
+    return False
+
+
 def _speak_piper(text: str) -> str:
-    piper = _bin("piper")
-    aplay = _bin("aplay")
-    model = (os.environ.get("LELAMP_PIPER_MODEL") or "").strip()
-    if not piper or not aplay or not model or not Path(model).is_file():
-        print("piper needs LELAMP_PIPER_MODEL pointing at a .onnx file, plus aplay.")
+    model = piper_model_path()
+    if model is None:
+        print("piper model missing. Run: sudo uv run python local_main.py --download-piper")
         return "none"
-    rate = os.environ.get("LELAMP_PIPER_RATE", "22050")
-    synth = subprocess.Popen(
-        [piper, "--model", model, "--output_raw"],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
-    play = subprocess.Popen(
-        [aplay, "-r", str(rate), "-f", "S16_LE", "-t", "raw", "-q", "-"],
-        stdin=synth.stdout,
-        stderr=subprocess.DEVNULL,
-    )
-    if synth.stdin is not None:
-        synth.stdin.write(text.encode("utf-8"))
-        synth.stdin.close()
-    if synth.stdout is not None:
-        synth.stdout.close()
-    play.wait(timeout=60)
-    synth.wait(timeout=60)
-    return "piper"
+    fd, wav_path = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        if not _piper_synth_python(text, model, wav_path) and not _piper_synth_cli(text, model, wav_path):
+            print("piper synth failed. Try: uv add piper-tts")
+            return "none"
+        if not _play_wav(wav_path):
+            print("could not play wav (need aplay)")
+            return "none"
+        return "piper"
+    finally:
+        Path(wav_path).unlink(missing_ok=True)
 
 
 def speak_text(
@@ -691,16 +832,19 @@ def speak_text(
         return "sim"
     engine = find_tts_engine()
     try:
+        if engine == "piper":
+            used = _speak_piper(cleaned)
+            if used == "piper":
+                return used
+            engine = "espeak-ng" if _bin("espeak-ng") else ("espeak" if _bin("espeak") else "none")
         if engine in {"espeak-ng", "espeak"}:
             used = _speak_espeak(cleaned, volume)
             if used in {"espeak-ng", "espeak"}:
                 return used
-        elif engine == "piper":
-            return _speak_piper(cleaned)
         elif engine == "none":
             pass
         else:
-            print(f"unknown LELAMP_TTS={engine!r} (use espeak-ng or piper)")
+            print(f"unknown LELAMP_TTS={engine!r} (use piper or espeak-ng)")
             return "error"
     except subprocess.TimeoutExpired:
         print("speak timed out")
@@ -708,7 +852,10 @@ def speak_text(
     except Exception as exc:
         print(f"speak failed: {exc}")
         return "error"
-    print("No TTS. Install: sudo apt install -y espeak-ng")
+    print(
+        "No TTS. For a human voice: uv add piper-tts && "
+        "sudo uv run python local_main.py --download-piper"
+    )
     return "none"
 
 
@@ -1134,7 +1281,7 @@ def apply_speech(
     print(f"lamp< {transcript}")
     compact = _compact_speech(transcript)
     if listen_mode and compact in {"hello", "hi", "hey"}:
-        utter(lamp, "I'm right here.")
+        utter(lamp, wake_ack(transcript))
         return "ack"
     phrase = direct_spoken_command(transcript)
     if phrase:
@@ -1178,7 +1325,7 @@ def run_listen_loop(
     catcher = SpeechCatcher(hold_s=hold_s)
     awake_until = 0.0
     if wake_word:
-        print("Mic on. Say hello lamp, wait for I'm right here, then one full sentence.")
+        print("Mic on. Say hello lamp, wait until I say I'm here, then speak one full sentence.")
         print("Short commands (lights off / nod) skip the wake word. Typing still works.")
     else:
         print("Mic on (no wake word). Finish a full sentence. Short commands run immediately.")
@@ -1237,14 +1384,14 @@ def run_listen_loop(
             if select.select([sys.stdin], [], [], 0)[0]:
                 line = sys.stdin.readline()
                 if line == "":
-                    print("Alright. I'll be here if you need me.")
+                    print("Okay. I'll be right here.")
                     return 0
                 print()
                 if dispatch_text(lamp, line, brain) == "quit":
                     return 0
     except KeyboardInterrupt:
         print()
-        print("Alright. I'll be here if you need me.")
+        print("Okay. I'll be right here.")
         return 0
     finally:
         stop.set()
@@ -1442,7 +1589,7 @@ class LocalLamp:
         self._play("wake_up")
         print("Lamp's awake. If I agree I'll nod; if I don't, I'll shake my head.")
         print("To talk, say hello lamp first.")
-        self.speak("Hi there. I'm your lamp.")
+        self.speak("Hey. I'm here with you.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1461,6 +1608,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="seconds of silence before a sentence is committed (default 0.9)",
     )
     parser.add_argument("--download-vosk", action="store_true", help="download the English Vosk small model")
+    parser.add_argument(
+        "--download-piper",
+        action="store_true",
+        help="download the companion English Piper voice (Ryan, not a celebrity clone)",
+    )
     parser.add_argument("--say", action="append", default=[], help="inject a spoken phrase (repeatable)")
     parser.add_argument("--speak", action="append", default=[], help="speak this sentence on the speaker")
     parser.add_argument("--no-speak", action="store_true", help="print replies only, do not use the speaker")
@@ -1490,9 +1642,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     load_runtime_env()
     print(f"local_main  stage {AGENT_STAGE}  ({AGENT_LABEL})")
+    fetched = False
     if args.download_vosk:
         download_vosk_model(args.en_model or args.model, lang="en")
+        fetched = True
+    if args.download_piper:
+        download_piper_voice()
+        fetched = True
+    if fetched and not (args.listen or args.speak or args.say or args.ask):
         return 0
+    print(describe_tts())
     if args.ask and args.no_cursor:
         raise SystemExit("--ask needs Cursor. Remove --no-cursor and set CURSOR_API_KEY.")
     lamp = LocalLamp(
@@ -1537,7 +1696,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 raw = input("lamp> ")
             except (EOFError, KeyboardInterrupt):
                 print()
-                print("Alright. I'll be here if you need me.")
+                print("Okay. I'll be right here.")
                 return 0
             if dispatch_text(lamp, raw, brain) == "quit":
                 return 0
