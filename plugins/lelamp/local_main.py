@@ -184,7 +184,8 @@ LIGHT_ONLY: Dict[str, str] = {
 }
 
 MUSIC_START = {
-    "音乐", "放音乐", "播放音乐", "来点音乐", "跳舞", "放歌",
+    "音乐", "放音乐", "播放音乐", "来点音乐", "听音乐", "放首歌", "来一首",
+    "跳舞", "放歌",
     "music", "play music", "playmusic", "dance",
 }
 MUSIC_STOP = {
@@ -284,10 +285,10 @@ def parse_line(line: str) -> Command:
     if low in {"最暗"}:
         return Command("brightness_set", 20, "暗下来。")
 
-    compact = _compact_speech(text)
-    if compact in MUSIC_START or low in MUSIC_START or text in MUSIC_START:
+    music_kind = _music_kind(text)
+    if music_kind == "music":
         return Command("music", None, "放音乐。")
-    if compact in MUSIC_STOP or low in MUSIC_STOP or text in MUSIC_STOP:
+    if music_kind == "music_stop":
         return Command("music_stop", None, "停了。")
 
     parts = text.split()
@@ -354,9 +355,42 @@ def command_phrases() -> List[str]:
 
 def _compact_speech(transcript: str) -> str:
     text = (transcript or "").strip()
-    for token in (" ", "\t", "，", "。", "！", "？", ",", ".", "!", "?", "、"):
+    for token in (
+        " ",
+        "\t",
+        "\u00a0",
+        "\u3000",
+        "\u200b",
+        "，",
+        "。",
+        "！",
+        "？",
+        ",",
+        ".",
+        "!",
+        "?",
+        "、",
+    ):
         text = text.replace(token, "")
     return text
+
+
+def _music_kind(transcript: str) -> Optional[str]:
+    """Return music / music_stop if the transcript names a song command."""
+    compact = _compact_speech(transcript)
+    low = compact.lower()
+    blobs = (compact, low, (transcript or "").strip().lower())
+    for phrase in sorted(MUSIC_STOP, key=len, reverse=True):
+        needle = _compact_speech(phrase).lower()
+        if needle and any(needle in blob for blob in blobs):
+            return "music_stop"
+    for phrase in sorted(MUSIC_START, key=len, reverse=True):
+        needle = _compact_speech(phrase).lower()
+        if needle and any(needle in blob for blob in blobs):
+            return "music"
+    if "音乐" in compact:
+        return "music"
+    return None
 
 
 def extract_spoken_command(transcript: str) -> Optional[str]:
@@ -642,20 +676,18 @@ def dispatch_text(lamp: LocalLamp, raw: str) -> str:
 def apply_speech(lamp: LocalLamp, transcript: str) -> str:
     print(f"灯< {transcript}")
     compact = _compact_speech(transcript)
-    if lamp.music_playing:
-        phrase = extract_spoken_command(transcript)
-        cmd = parse_line(phrase or compact or transcript)
-        if cmd.kind in {"music_stop", "quit", "music"}:
-            return dispatch_text(lamp, phrase or transcript)
+    phrase = extract_spoken_command(transcript)
+    raw = phrase or compact or (transcript or "").strip()
+    cmd = parse_line(raw)
+    if lamp.music_playing and cmd.kind not in {"music_stop", "quit", "music"}:
         print("正在跳舞")
         return "busy"
-    phrase = extract_spoken_command(transcript)
-    if not phrase:
+    if cmd.kind in {"unknown", "noop"}:
         print(f"听到「{transcript}」，但不是灯的指令。")
         return "unknown"
-    if phrase != compact:
+    if phrase and phrase != compact:
         print(f"听成：{phrase}")
-    return dispatch_text(lamp, phrase)
+    return dispatch_text(lamp, raw)
 
 
 def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path) -> int:
@@ -668,6 +700,7 @@ def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path)
     )
     worker.start()
     print("麦克风线程已开。请说：你好、点头、关灯、音乐。打字回车也可以。")
+    print("音乐指令已开：听到「音乐」就随机播放 music/ 文件夹。")
     try:
         while True:
             try:

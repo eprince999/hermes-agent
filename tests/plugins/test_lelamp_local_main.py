@@ -114,6 +114,15 @@ def test_extract_spoken_command_from_padded_asr():
     assert extract_spoken_command("放音乐吧") == "放音乐"
 
 
+def test_bare_music_word_is_a_command():
+    assert parse_line("音乐").kind == "music"
+    assert parse_line("音 乐").kind == "music"
+    assert parse_line("听音乐").kind == "music"
+    assert parse_line("停止音乐").kind == "music_stop"
+    assert extract_spoken_command("音乐") == "音乐"
+    assert extract_spoken_command("音 乐") == "音乐"
+
+
 def test_show_stage_prints_current_stage(capsys):
     from plugins.lelamp import local_main
 
