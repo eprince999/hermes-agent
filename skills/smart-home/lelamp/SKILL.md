@@ -44,15 +44,13 @@ LeLamp is a 5V lamp. Use the 5V 2A supplies from the assembly guide.
 
 If the lamp is already assembled, copy `plugins/lelamp/local_main.py` to `~/lelamp_runtime/local_main.py`.
 
-Keep the runnable name `local_main.py`. After a stage works, run `sudo uv run python local_main.py --snapshot` or copy into `lamp_snapshots/`. Do not invent `local_main_v2.py` as the launcher. Tracked archives: `plugins/lelamp/lamp_snapshots/stage2.py` (Chinese Vosk keywords), `stage3.py` (desk + coin-flip pose), `stage4.py` (music + beat dance, no model prompt). Copy a snapshot back over `local_main.py` to roll back.
+Keep the runnable name `local_main.py`. Snapshot 2 (Chinese Vosk keywords, no music) is archived at `plugins/lelamp/lamp_snapshots/stage2.py`. The runnable `local_main.py` is snapshot 2 plus a `music/` folder. Copy a snapshot back over `local_main.py` to roll back. Do not invent `local_main_v2.py` as the launcher.
 
-Stage 1 (keyboard, no cloud): `sudo uv run python local_main.py`. Type `hello` / `nod` / `warm` / `lights off`. `--sim` prints actions without servos.
+Stage 1 (keyboard, no cloud): `sudo uv run python local_main.py`. Type `你好` / `点头` / `暖光` / `关灯`. `--sim` prints actions without servos.
 
-Stage 2 (ReSpeaker, English): `uv add vosk`, then `--download-vosk` (English small model) and `--listen`. Say **hello lamp** once; after Yeah?, say a keyword. Short commands (`lights off`, `nod`, `yeah`) skip the wake word. `--no-wake-word` opens the mic. Mapping without a mic: `--say "lights off"`.
+Stage 2 (ReSpeaker, Chinese Vosk): `uv add vosk`, then `--download-vosk` and `--listen`. Say **你好**、**点头**、**关灯**、**音乐**. Mapping without a mic: `--say "关灯"`.
 
-Stage 3 (Vosk + silent poses): desk commands run locally (`lights on/off`, `study mode`, `reading mode`, `closer`). Other talk is coin-flipped to Cursor for one official recording. No spoken replies.
-
-Stage 4 (Vosk + music dance): no model prompt. Voice **desk commands run locally**: `lights on` / `lights off`, `brighter` / `dimmer`, `study mode`, `reading mode`, `closer`, **`music` / `音乐`** (creates `~/lelamp_runtime/music/` and plays a random wav/mp3 from it), **`stop music`**. Drop your own songs in that folder. Other talk is ignored. Test with `--sim --no-cursor --say "music"`. `--show-stage` starts with `4`.
+Music: startup creates `~/lelamp_runtime/music/`. Drop wav/mp3/ogg there. Say **音乐** / **放音乐** to play a random file and dance; **停止音乐** to stop. An empty folder falls back to short builtin beats in `music/.builtin/`. `--show-stage` starts with `2`.
 
 The LiveKit + OpenAI Realtime path is optional later: copy `plugins/lelamp/runtime_main.py` over `~/lelamp_runtime/main.py`, put `OPENAI_API_KEY` in `.env`, then `sudo uv run main.py console`.
 
@@ -102,9 +100,9 @@ Official recordings: `wake_up`, `nod`, `headshake`, `curious`, `scanning`, `exci
 
 - Do not invent recording names. Unknown expressions are rejected before any servo moves.
 - Do not fully spin the base yaw or head yaw past about ±90° from center during calibration.
-- Pi Zero 2W cannot run a cloud LLM locally. `local_main.py` uses Vosk plus Cursor only to pick a pose. Leave official `main.py` (OpenAI Realtime) untouched.
+- Pi Zero 2W cannot run a cloud LLM locally. `local_main.py` uses on-device Vosk keywords plus a local `music/` folder. Leave official `main.py` (OpenAI Realtime) untouched.
 - One Raspberry Pi should run only this lamp's runtime while you talk to it.
-- Stage 3 does not speak. Cursor tools move the body; there is no TTS reply and no chat prompt. Cloud Agents cannot move Pi GPIO.
+- Cloud Agents cannot move Pi GPIO. Drop songs into `~/lelamp_runtime/music/` on the Pi itself.
 
 ## Verification
 
