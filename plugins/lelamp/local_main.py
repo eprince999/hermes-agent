@@ -18,6 +18,10 @@ Keep official ``main.py`` untouched. From the runtime repo root:
 
 Type Chinese commands, or with ``--listen`` speak them to the ReSpeaker.
 Say 音乐 to play a random file from the music/ folder. ``q`` or Ctrl+C quits.
+Music prefers a paired Bluetooth speaker, then the ReSpeaker; never HDMI.
+Install the mp3 CLI with ``sudo apt update && sudo apt install -y mpg123``
+(do not install ffmpeg — it pulls a huge GUI stack). Pair a speaker with
+``sudo uv run python local_main.py --bt-connect``.
 
 Roadmap:
   1. keyboard + motors + RGB
@@ -405,13 +409,26 @@ def extract_spoken_command(transcript: str) -> Optional[str]:
     return best_phrase
 
 
+_EXTRA_BIN_DIRS = ("/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin", "/sbin")
+
+
+def _ensure_os_path() -> None:
+    """Keep apt binaries visible under ``sudo uv run`` (venv PATH is narrow)."""
+    current = os.environ.get("PATH") or ""
+    prefix = ":".join(_EXTRA_BIN_DIRS)
+    if not current.startswith(prefix):
+        os.environ["PATH"] = f"{prefix}:{current}" if current else prefix
+
+
 def _bin(name: str) -> Optional[str]:
+    _ensure_os_path()
     found = shutil.which(name)
     if found:
         return found
-    candidate = Path("/usr/bin") / name
-    if candidate.is_file() and os.access(candidate, os.X_OK):
-        return str(candidate)
+    for folder in _EXTRA_BIN_DIRS:
+        candidate = Path(folder) / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
     return None
 
 
@@ -522,10 +539,12 @@ def pick_random_track(folder: Optional[Path] = None) -> Tuple[Path, int]:
 
 
 def parse_alsa_playback(listing: str) -> Tuple[Optional[str], Optional[str]]:
-    """Return (pcm name, card index) for the ReSpeaker/seeed card."""
+    """Return (pcm name, card index) for the ReSpeaker/seeed card. Never HDMI."""
     for line in listing.splitlines():
         low = line.lower()
         if not low.startswith("card "):
+            continue
+        if "hdmi" in low or "vc4" in low:
             continue
         if not any(tag in low for tag in ("seeed", "respeaker", "voicecard", "array")):
             continue
@@ -535,6 +554,163 @@ def parse_alsa_playback(listing: str) -> Tuple[Optional[str], Optional[str]]:
             continue
         return f"plughw:{card},0", card
     return None, None
+
+
+def parse_bluetoothctl_devices(text: str) -> List[Tuple[str, str]]:
+    """Return [(mac, name), ...] from `bluetoothctl devices` output."""
+    found: List[Tuple[str, str]] = []
+    for line in (text or "").splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 2 or parts[0].lower() != "device":
+            continue
+        mac = parts[1].strip()
+        if mac.count(":") != 5:
+            continue
+        name = parts[2].strip() if len(parts) > 2 else mac
+        found.append((mac.upper(), name))
+    return found
+
+
+def parse_pactl_bluez_sinks(text: str) -> List[Tuple[str, str]]:
+    """Return [(sink_name, label), ...] for Bluetooth Pulse/PipeWire sinks."""
+    found: List[Tuple[str, str]] = []
+    for line in (text or "").splitlines():
+        cols = line.split("\t") if "\t" in line else line.split()
+        if len(cols) < 2:
+            continue
+        name = cols[1] if cols[0].isdigit() else cols[0]
+        low = name.lower()
+        if "bluez" not in low and "bluealsa" not in low:
+            continue
+        found.append((name, name))
+    return found
+
+
+def parse_bluealsa_pcms(text: str) -> List[str]:
+    found: List[str] = []
+    for line in (text or "").splitlines():
+        raw = line.strip()
+        low = raw.lower()
+        if "bluealsa" in low and ("a2dp" in low or raw.startswith("bluealsa:")):
+            found.append(raw.split()[0])
+    return found
+
+
+def _run_text(argv: Sequence[str], *, timeout: float = 8.0) -> str:
+    try:
+        return subprocess.check_output(
+            list(argv),
+            text=True,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+        )
+    except Exception:
+        return ""
+
+
+def bluetooth_macs_and_names() -> List[Tuple[str, str]]:
+    bt = _bin("bluetoothctl")
+    if not bt:
+        return []
+    _run_text([bt, "power", "on"], timeout=5)
+    devices = parse_bluetoothctl_devices(_run_text([bt, "devices"], timeout=8))
+    connected = parse_bluetoothctl_devices(_run_text([bt, "devices", "Connected"], timeout=8))
+    # Prefer already-connected speakers first.
+    connected_macs = {mac for mac, _name in connected}
+    ordered = list(connected) + [item for item in devices if item[0] not in connected_macs]
+    seen = set()
+    unique: List[Tuple[str, str]] = []
+    for mac, name in ordered:
+        if mac in seen:
+            continue
+        seen.add(mac)
+        unique.append((mac, name))
+    return unique
+
+
+_BT_TRIED = False
+
+
+def print_bluetooth_pair_help() -> None:
+    print("没有已配对的蓝牙设备。音箱开机可发现后，在 Pi 上执行：")
+    print("  bluetoothctl power on")
+    print("  bluetoothctl scan on")
+    print("  bluetoothctl devices")
+    print("  bluetoothctl pair AA:BB:CC:DD:EE:FF")
+    print("  bluetoothctl trust AA:BB:CC:DD:EE:FF")
+    print("  bluetoothctl connect AA:BB:CC:DD:EE:FF")
+    print("或: sudo uv run python local_main.py --bt-connect")
+
+
+def connect_bluetooth_speaker(
+    mac: Optional[str] = None,
+    *,
+    quiet: bool = False,
+) -> Optional[Tuple[str, str]]:
+    global _BT_TRIED
+    _BT_TRIED = True
+    bt = _bin("bluetoothctl")
+    if not bt:
+        if not quiet:
+            print("没有 bluetoothctl，装: sudo apt install -y bluez")
+        return None
+    _run_text([bt, "power", "on"], timeout=5)
+    _run_text([bt, "agent", "on"], timeout=5)
+    _run_text([bt, "default-agent"], timeout=5)
+    targets = bluetooth_macs_and_names()
+    if mac:
+        mac_u = mac.strip().upper()
+        name = next((n for m, n in targets if m == mac_u), mac_u)
+        targets = [(mac_u, name)] + [item for item in targets if item[0] != mac_u]
+    if not targets:
+        if not quiet:
+            print_bluetooth_pair_help()
+        return None
+    for target_mac, name in targets:
+        print(f"连接蓝牙 {name} ({target_mac})")
+        out = _run_text([bt, "connect", target_mac], timeout=20)
+        low = (out or "").lower()
+        connected = parse_bluetoothctl_devices(_run_text([bt, "devices", "Connected"], timeout=8))
+        if (
+            "connected" in low
+            or "already" in low
+            or "success" in low
+            or any(m == target_mac for m, _n in connected)
+        ):
+            # Pulse/PipeWire needs a moment to publish the A2DP sink.
+            time.sleep(1.2)
+            print(f"蓝牙已连接 {name}")
+            return target_mac, name
+        print(f"没连上 {name}: {(out or '').strip()[:160]}")
+    return None
+
+
+def find_bluetooth_playback() -> Tuple[Optional[str], Optional[str], str]:
+    """Return (device, card_or_sink_hint, backend) for a Bluetooth speaker.
+
+    backend is pulse or alsa. HDMI is never returned.
+    """
+    pactl = _bin("pactl")
+    if pactl:
+        sinks = parse_pactl_bluez_sinks(_run_text([pactl, "list", "short", "sinks"], timeout=5))
+        if sinks:
+            return sinks[0][0], None, "pulse"
+    aplay = _bin("aplay")
+    if aplay:
+        pcms = parse_bluealsa_pcms(_run_text([aplay, "-L"], timeout=5))
+        if pcms:
+            return pcms[0], None, "alsa"
+    macs = bluetooth_macs_and_names()
+    connected = parse_bluetoothctl_devices(
+        _run_text([_bin("bluetoothctl") or "bluetoothctl", "devices", "Connected"], timeout=8)
+    ) if _bin("bluetoothctl") else []
+    if connected:
+        mac = connected[0][0]
+        return f"bluealsa:DEV={mac},PROFILE=a2dp", None, "alsa"
+    if macs:
+        mac = macs[0][0]
+        return f"bluealsa:DEV={mac},PROFILE=a2dp", None, "alsa"
+    return None, None, "alsa"
 
 
 def find_alsa_playback_device() -> Optional[str]:
@@ -582,8 +758,43 @@ def unmute_alsa_card(card: Optional[str]) -> None:
         )
 
 
-def _player_env(device: Optional[str], card: Optional[str] = None) -> Dict[str, str]:
+def _pulse_server() -> Optional[str]:
+    """Find Pulse/PipeWire even when this process is root via sudo."""
+    candidates: List[str] = []
+    sudo_uid = (os.environ.get("SUDO_UID") or "").strip()
+    runtime = (os.environ.get("XDG_RUNTIME_DIR") or "").strip()
+    if sudo_uid:
+        candidates.append(f"/run/user/{sudo_uid}/pulse/native")
+    if runtime:
+        candidates.append(f"{runtime}/pulse/native")
+    candidates.append(f"/run/user/{os.getuid()}/pulse/native")
+    if sudo_uid != "1000" and str(os.getuid()) != "1000":
+        candidates.append("/run/user/1000/pulse/native")
+    seen = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        if Path(path).exists():
+            return f"unix:{path}"
+    return None
+
+
+def _player_env(
+    device: Optional[str],
+    card: Optional[str] = None,
+    *,
+    backend: str = "alsa",
+) -> Dict[str, str]:
+    _ensure_os_path()
     env = os.environ.copy()
+    if backend == "pulse" and device:
+        env["SDL_AUDIODRIVER"] = "pulse"
+        env["PULSE_SINK"] = device
+        server = _pulse_server()
+        if server:
+            env["PULSE_SERVER"] = server
+        return env
     env["SDL_AUDIODRIVER"] = "alsa"
     if device:
         env["AUDIODEV"] = device
@@ -595,8 +806,13 @@ def _player_env(device: Optional[str], card: Optional[str] = None) -> Dict[str, 
     return env
 
 
-def music_player_commands(path: Path, *, device: Optional[str] = None) -> List[List[str]]:
-    """Build argv lists for common Pi players. aplay alone cannot decode mp3."""
+def music_player_commands(
+    path: Path,
+    *,
+    device: Optional[str] = None,
+    backend: str = "alsa",
+) -> List[List[str]]:
+    """Build argv lists for common Pi players. Never default to HDMI."""
     path_s = str(path)
     suffix = path.suffix.lower()
     commands: List[List[str]] = []
@@ -604,6 +820,41 @@ def music_player_commands(path: Path, *, device: Optional[str] = None) -> List[L
     def add(binary: Optional[str], args: Sequence[str]) -> None:
         if binary:
             commands.append([binary, *args])
+
+    if backend == "pulse" and device:
+        mpg = _bin("mpg123") or _bin("mpg321")
+        if suffix in {".mp3", ".mp2"} and mpg:
+            add(mpg, ["-q", "-o", "pulse", path_s])
+        if suffix == ".wav":
+            add(_bin("paplay"), ["--sink", device, path_s])
+        add(_bin("mpv"), [f"--audio-device=pulse/{device}", "--no-video", "--really-quiet", path_s])
+        add(_bin("ffplay"), ["-nodisp", "-autoexit", "-loglevel", "quiet", path_s])
+        ffmpeg = _bin("ffmpeg")
+        if ffmpeg:
+            add(
+                ffmpeg,
+                ["-nostdin", "-hide_banner", "-loglevel", "error", "-i", path_s, "-f", "pulse", device],
+            )
+        gst_launch = _bin("gst-launch-1.0")
+        if gst_launch:
+            add(
+                gst_launch,
+                [
+                    "-q",
+                    "filesrc",
+                    f"location={path_s}",
+                    "!",
+                    "decodebin",
+                    "!",
+                    "audioconvert",
+                    "!",
+                    "audioresample",
+                    "!",
+                    "pulsesink",
+                    f"device={device}",
+                ],
+            )
+        return commands
 
     aplay = _bin("aplay")
     ffmpeg = _bin("ffmpeg")
@@ -618,7 +869,7 @@ def music_player_commands(path: Path, *, device: Optional[str] = None) -> List[L
 
     mpg = _bin("mpg123") or _bin("mpg321")
     if suffix in {".mp3", ".mp2"} and mpg:
-        mpg_args = ["-q"]
+        mpg_args = ["-q", "-o", "alsa"]
         if device:
             mpg_args.extend(["-a", device])
         mpg_args.append(path_s)
@@ -678,10 +929,12 @@ def _spawn_player(argv: Sequence[str], *, env: Dict[str, str]) -> Optional["subp
             env=env,
             start_new_session=True,
         )
-    except OSError:
+    except OSError as exc:
+        print(f"player skip {' '.join(list(argv)[:2])}: {exc}")
         return None
-    time.sleep(0.2)
+    time.sleep(0.25)
     if proc.poll() is not None:
+        print(f"player fail {' '.join(list(argv)[:3])} exit={proc.returncode}")
         return None
     return proc
 
@@ -745,36 +998,37 @@ def _spawn_pygame_player(
     device: Optional[str],
     card: Optional[str],
     env: Dict[str, str],
+    backend: str = "alsa",
 ) -> Optional["subprocess.Popen[bytes]"]:
     script = r"""
 import os, sys, time
-path = sys.argv[1]
-device = sys.argv[2]
-card = sys.argv[3]
-os.environ["SDL_AUDIODRIVER"] = "alsa"
-if device:
-    os.environ["AUDIODEV"] = device
-    os.environ["SDL_AUDIO_DEVICE_NAME"] = device
-if card:
-    os.environ["ALSA_CARD"] = card
-    os.environ["ALSA_PCM_CARD"] = card
-    os.environ["ALSA_PCM_DEVICE"] = "0"
-import pygame
-try:
+path, device, card, backend = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+if backend == "pulse":
+    os.environ["SDL_AUDIODRIVER"] = "pulse"
     if device:
-        pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=2048, devicename=device)
-    else:
-        pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=2048)
-except TypeError:
-    pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=2048)
+        os.environ["PULSE_SINK"] = device
+else:
+    os.environ["SDL_AUDIODRIVER"] = "alsa"
+    if card:
+        os.environ["ALSA_CARD"] = card
+        os.environ["ALSA_PCM_CARD"] = card
+        os.environ["ALSA_PCM_DEVICE"] = "0"
+    elif device.startswith("plughw:") or device.startswith("hw:"):
+        os.environ["ALSA_CARD"] = device.split(":", 1)[1].split(",", 1)[0]
+    if device:
+        os.environ["AUDIODEV"] = device
+import pygame
+# Do not pass mixer devicename=plughw:... — SDL_mixer rejects it and
+# the whole player subprocess exits, leaving no sound.
+pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=2048)
 pygame.mixer.music.set_volume(1.0)
 pygame.mixer.music.load(path)
 pygame.mixer.music.play()
-sys.stderr.write("pygame device=%s mixer=%s\n" % (device or "default", pygame.mixer.get_init()))
+sys.stderr.write("pygame backend=%s device=%s mixer=%s\n" % (backend, device or "default", pygame.mixer.get_init()))
 while pygame.mixer.music.get_busy():
     time.sleep(0.15)
 """
-    argv = [sys.executable, "-c", script, str(path), device or "", card or ""]
+    argv = [sys.executable, "-c", script, str(path), device or "", card or "", backend]
     try:
         proc = subprocess.Popen(
             argv,
@@ -816,25 +1070,62 @@ def _stop_process(proc: Optional["subprocess.Popen[bytes]"]) -> None:
         _stop_process(buddy)
 
 
-def start_music_player(path: Path) -> Optional["subprocess.Popen[bytes]"]:
+AUDIO_PREFER = "auto"
+
+
+def choose_playback(*, prefer: Optional[str] = None) -> Tuple[Optional[str], Optional[str], str]:
+    """Return (device, card, backend). Bluetooth first. Never HDMI."""
+    global _BT_TRIED
+    mode = (prefer or AUDIO_PREFER or os.environ.get("LELAMP_AUDIO") or "auto").strip().lower()
+    if mode in {"bt", "bluetooth", "auto"}:
+        device, card, backend = find_bluetooth_playback()
+        if not device and not _BT_TRIED:
+            connect_bluetooth_speaker(quiet=(mode == "auto"))
+            device, card, backend = find_bluetooth_playback()
+        if device:
+            print(f"喇叭 蓝牙 {device}")
+            return device, card, backend
+        if mode in {"bt", "bluetooth"}:
+            print("没有蓝牙音箱，不使用 HDMI。")
+            return None, None, "alsa"
     device, card = find_alsa_playback()
-    unmute_alsa_card(card)
-    env = _player_env(device, card)
     if device:
-        print(f"喇叭 {device}")
-    for argv in music_player_commands(path, device=device):
+        unmute_alsa_card(card)
+        print(f"喇叭 ReSpeaker {device}")
+        return device, card, "alsa"
+    print("没有 ReSpeaker/蓝牙喇叭。不会使用 HDMI。")
+    return None, None, "alsa"
+
+
+def print_mpg123_install_hint() -> None:
+    print("没有播放器。mp3 只需轻量 mpg123，不要装 ffmpeg（会拖 100+ 个 GTK 包）。")
+    print("Debian 源过期时先更新再装：")
+    print("  sudo apt update")
+    print("  sudo apt install -y mpg123")
+
+
+def start_music_player(path: Path) -> Optional["subprocess.Popen[bytes]"]:
+    device, card, backend = choose_playback()
+    env = _player_env(device, card, backend=backend)
+    if not device:
+        print("没有可用喇叭。配对蓝牙音箱：sudo uv run python local_main.py --bt-connect")
+        return None
+    for argv in music_player_commands(path, device=device, backend=backend):
         proc = _spawn_player(argv, env=env)
         if proc is not None:
             print(f"player {' '.join(argv[:1])}")
             return proc
-    piped = _spawn_ffmpeg_aplay(path, device=device, env=env)
-    if piped is not None:
-        print("player ffmpeg|aplay")
-        return piped
-    pygame_proc = _spawn_pygame_player(path, device=device, card=card, env=env)
+    pygame_proc = _spawn_pygame_player(
+        path, device=device, card=card, env=env, backend=backend
+    )
     if pygame_proc is not None:
-        print(f"player pygame {device or 'default'}")
+        print(f"player pygame {device}")
         return pygame_proc
+    if backend == "alsa":
+        piped = _spawn_ffmpeg_aplay(path, device=device, env=env)
+        if piped is not None:
+            print("player ffmpeg|aplay")
+            return piped
     return None
 
 
@@ -1236,8 +1527,7 @@ class LocalLamp:
         proc = start_music_player(path)
         self._music_proc = proc
         if proc is None:
-            print("没有播放器。mp3 需要 mpg123 或 ffmpeg。在 Pi 上执行：")
-            print("  sudo apt install -y mpg123 ffmpeg")
+            print_mpg123_install_hint()
             self._release_mic()
         self._dance_thread = threading.Thread(
             target=self._dance_loop,
@@ -1328,6 +1618,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--say", action="append", default=[], help="inject a spoken phrase (repeatable)")
     parser.add_argument("--device", type=int, default=None, help="sounddevice input index")
     parser.add_argument("--model", type=Path, default=None, help="path to vosk-model-small-cn-0.22")
+    parser.add_argument(
+        "--audio",
+        choices=("auto", "bt", "seeed"),
+        default=(os.environ.get("LELAMP_AUDIO") or "auto"),
+        help="music output: bluetooth first (auto/bt) or ReSpeaker (seeed). Never HDMI.",
+    )
+    parser.add_argument("--bt-connect", action="store_true", help="connect a paired Bluetooth speaker and exit")
+    parser.add_argument("--bt-mac", default=None, help="Bluetooth MAC to connect, e.g. AA:BB:CC:DD:EE:FF")
     parser.add_argument("--show-stage", action="store_true", help="print stage number and exit")
     parser.add_argument(
         "--snapshot",
@@ -1340,7 +1638,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    global AUDIO_PREFER
     args = build_parser().parse_args(argv)
+    AUDIO_PREFER = args.audio
     if args.show_stage:
         print(f"{AGENT_STAGE} {AGENT_LABEL}")
         return 0
@@ -1348,9 +1648,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         snapshot_current(args.snapshot)
         return 0
     print(f"local_main  stage {AGENT_STAGE}  ({AGENT_LABEL})")
+    if args.bt_connect:
+        connected = connect_bluetooth_speaker(args.bt_mac)
+        return 0 if connected else 1
     if args.download_vosk:
         download_vosk_model(args.model)
         return 0
+    if not args.sim and args.audio != "seeed":
+        connected = connect_bluetooth_speaker(args.bt_mac)
+        if not connected and args.audio == "auto":
+            print("没有蓝牙音箱，音乐走 ReSpeaker。配对后执行 --bt-connect")
     lamp = LocalLamp(
         sim=args.sim,
         port=args.port,

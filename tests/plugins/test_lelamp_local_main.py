@@ -236,11 +236,31 @@ def test_mp3_player_commands_include_mpg123_and_ffmpeg(monkeypatch):
         return known.get(name)
 
     monkeypatch.setattr(local_main, "_bin", fake_bin)
-    commands = local_main.music_player_commands(Path("rain.mp3"), device="plughw:1,0")
+    commands = local_main.music_player_commands(Path("rain.mp3"), device="plughw:0,0")
     joined = [" ".join(cmd) for cmd in commands]
     assert any(line.startswith("/usr/bin/mpg123") for line in joined)
     assert any(line.startswith("/usr/bin/ffmpeg") for line in joined)
     assert not any(line.startswith("/usr/bin/aplay") for line in joined)
+    mpg = next(line for line in joined if line.startswith("/usr/bin/mpg123"))
+    assert "-o alsa" in mpg
+    assert "-a plughw:0,0" in mpg
+
+
+def test_mp3_player_commands_work_with_only_mpg123(monkeypatch):
+    from plugins.lelamp import local_main
+
+    monkeypatch.setattr(local_main, "_bin", lambda name: "/usr/bin/mpg123" if name == "mpg123" else None)
+    commands = local_main.music_player_commands(Path("rain.mp3"), device="plughw:0,0")
+    assert commands
+    assert commands[0][0].endswith("mpg123")
+    assert "ffmpeg" not in " ".join(commands[0])
+
+
+def test_install_hint_is_mpg123_not_ffmpeg():
+    source = _source()
+    assert "sudo apt install -y mpg123 ffmpeg" not in source
+    assert "sudo apt update" in source
+    assert "sudo apt install -y mpg123" in source
 
 
 def test_music_rgb_pulse_does_not_play_recordings():
@@ -280,3 +300,53 @@ def test_parse_seeed_aplay_listing():
     device, card = parse_alsa_playback(listing)
     assert card == "0"
     assert device == "plughw:0,0"
+
+
+def test_alsa_playback_skips_hdmi_and_vc4():
+    from plugins.lelamp.local_main import parse_alsa_playback
+
+    listing = (
+        "**** List of PLAYBACK Hardware Devices ****\n"
+        "card 0: seeed2micvoicec [seeed-2mic-voicecard], device 0: "
+        "bcm2835-i2s-tlv320aic3x-hifi tlv320aic3x-hifi-0 []\n"
+        "  Subdevices: 1/1\n"
+        "card 1: vc4hdmi [vc4-hdmi], device 0: MAI PCM i2s-hifi-0 [i2s-hifi-0]\n"
+        "  Subdevices: 1/1\n"
+    )
+    device, card = parse_alsa_playback(listing)
+    assert card == "0"
+    assert device == "plughw:0,0"
+    hdmi_only = (
+        "card 0: vc4hdmi [vc4-hdmi], device 0: MAI PCM i2s-hifi-0 []\n"
+        "card 1: vc4hdmi1 [vc4-hdmi-1], device 0: MAI PCM i2s-hifi-0 []\n"
+    )
+    assert parse_alsa_playback(hdmi_only) == (None, None)
+
+
+def test_parse_bluetooth_sinks_and_devices():
+    from plugins.lelamp.local_main import (
+        parse_bluealsa_pcms,
+        parse_bluetoothctl_devices,
+        parse_pactl_bluez_sinks,
+    )
+
+    devices = parse_bluetoothctl_devices(
+        "Device AA:BB:CC:DD:EE:FF JBL Flip 5\n"
+        "Device 11:22:33:44:55:66 Headphones\n"
+        "Controller 00:11:22:33:44:55 raspberrypi\n"
+    )
+    assert devices[0] == ("AA:BB:CC:DD:EE:FF", "JBL Flip 5")
+    assert devices[1][0] == "11:22:33:44:55:66"
+
+    sinks = parse_pactl_bluez_sinks(
+        "1\talsa_output.platform-vc4-hdmi.stereo\tmodule-alsa-card.c\ts16le 2ch 48000Hz\tSUSPENDED\n"
+        "2\tbluez_output.AA_BB_CC_DD_EE_FF.a2dp_sink\tmodule-bluez5-device.c\ts16le 2ch 44100Hz\tIDLE\n"
+    )
+    assert len(sinks) == 1
+    assert "bluez_output" in sinks[0][0]
+    assert "hdmi" not in sinks[0][0].lower()
+
+    pcms = parse_bluealsa_pcms(
+        "null\nbluealsa:DEV=AA:BB:CC:DD:EE:FF,PROFILE=a2dp\ndefault\n"
+    )
+    assert pcms == ["bluealsa:DEV=AA:BB:CC:DD:EE:FF,PROFILE=a2dp"]
