@@ -167,9 +167,12 @@ def test_tracked_stage2_archive_has_no_music_player():
     assert "vosk-model-small-cn-0.22" in stage2
     assert "def play_music" not in stage2
     stage3 = (root / "stage3.py").read_text(encoding="utf-8")
+    runnable = (root.parent / "local_main.py").read_text(encoding="utf-8")
     assert "AGENT_STAGE = 3" in stage3
     assert "def play_music" in stage3
     assert "vosk-model-small-cn-0.22" in stage3
+    assert "def _start_player" in stage3
+    assert stage3 == runnable
     assert not (root / "stage4.py").is_file()
 
 
