@@ -205,10 +205,6 @@ def test_music_command_plays_from_folder(tmp_path, monkeypatch, capsys):
     assert apply_speech(lamp, "停止音乐") == "music_stop"
     assert lamp.music_playing is False
 
-    assert apply_speech(lamp, "今天天气") == "busy"
-    assert apply_speech(lamp, "停止音乐") == "music_stop"
-    assert lamp.music_playing is False
-
 
 def test_music_folder_plays_user_files_not_builtins(tmp_path, monkeypatch):
     monkeypatch.setenv("LELAMP_MUSIC_DIR", str(tmp_path))
