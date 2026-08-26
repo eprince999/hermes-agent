@@ -48,9 +48,9 @@ Keep the runnable name `local_main.py`. After a stage works, run `sudo uv run py
 
 Stage 1 (keyboard, no cloud): `sudo uv run python local_main.py`. Type `hello` / `nod` / `warm` / `lights off`. `--sim` prints actions without servos.
 
-Stage 2 (ReSpeaker, English): `uv add vosk`, then `--download-vosk` (English small model) and `--listen`. Say **hello lamp**, wait for I'm right here, then one full sentence. Short commands (`lights off`, `nod`) skip the wake word. `--no-wake-word` opens the mic. Mapping without a mic: `--say "lights off"`.
+Stage 2 (ReSpeaker, English): `uv add vosk`, then `--download-vosk` (English small model) and `--listen`. Say **hello lamp**, wait for I am here, then one full sentence. Short commands (`lights off`, `nod`) skip the wake word. `--no-wake-word` opens the mic. Mapping without a mic: `--say "lights off"`.
 
-Stage 3 (Cursor API + speaker): put `CURSOR_API_KEY=crsr_...` in `~/lelamp_runtime/.env` (key from https://cursor.com/dashboard/api). `uv add cursor-sdk`, `sudo apt install -y espeak-ng`, then `sudo uv run python local_main.py --sim --ask "Do you agree warm light is nicer?"`. Short keywords run locally. Full sentences go to Cursor (agree → nod, disagree → headshake). Replies play on the ReSpeaker in fluent English with a female voice (`espeak-ng -v en-us+f3`). `--speak "Hi there. I'm your lamp."` tests the speaker. `--no-speak` prints only. This is cursor-sdk, not a DeepSeek/OpenAI chat URL.
+Stage 3 (Cursor API + speaker): put `CURSOR_API_KEY=crsr_...` in `~/lelamp_runtime/.env` (key from https://cursor.com/dashboard/api). `uv add cursor-sdk`, `sudo apt install -y espeak-ng`, then `sudo uv run python local_main.py --sim --ask "Do you agree warm light is nicer?"`. Short keywords run locally. Full sentences go to Cursor (agree → nod, disagree → headshake). Replies play on the ReSpeaker in fluent, slightly pedantic male English (`espeak-ng -v en-us+m2`). `--speak "Hello. I am the lamp."` tests the speaker. `--no-speak` prints only. This is cursor-sdk, not a DeepSeek/OpenAI chat URL.
 
 The LiveKit + OpenAI Realtime path is optional later: copy `plugins/lelamp/runtime_main.py` over `~/lelamp_runtime/main.py`, put `OPENAI_API_KEY` in `.env`, then `sudo uv run main.py console`.
 
@@ -91,7 +91,7 @@ Official recordings: `wake_up`, `nod`, `headshake`, `curious`, `scanning`, `exci
 2. Call `lelamp_light` with `auto=true` so the color matches the local hour.
 3. Every spoken reply pairs `lelamp_express` and `lelamp_light`. Talk plus a still dark head feels broken.
 4. On the Pi `local_main.py` path, always speak fluent English. Never reply in Chinese.
-5. Be a warm, slightly clumsy girl who is a desk lamp — not the sarcastic LiveKit demo, and not a generic assistant.
+5. Speak like a precise, socially awkward American man who is a desk lamp — not a TV character, and not a generic assistant.
 6. Store lasting preferences with `memory` (favorite color, night brightness, name).
 7. "只做灯" / dim / brighter → `lelamp_light` only. Skip motion.
 8. Unknown hardware errors: stay in sim, report the error, do not invent a working servo.

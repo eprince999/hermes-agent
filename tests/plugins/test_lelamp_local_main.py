@@ -81,7 +81,7 @@ def test_sim_express_then_off_updates_state():
         led_count=64,
         brightness=70,
     )
-    assert "Hi there" in lamp.apply(parse_line("hello"))
+    assert "Hello. I am the lamp." in lamp.apply(parse_line("hello"))
     assert lamp.last_expression == "wake_up"
     assert lamp.last_rgb != (0, 0, 0)
     lamp.apply(parse_line("lights off"))
@@ -178,9 +178,9 @@ def test_main_sim_scripted_session(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
     assert local_main.main(["--sim", "--no-wake"]) == 0
     out = capsys.readouterr().out
-    assert "Sure, that works for me." in out
+    assert "Yes. That is correct." in out
     assert "expression=nod" in out
-    assert "I'll be here if you need me." in out
+    assert "I will be here." in out
 
 
 def test_extract_spoken_command_from_padded_asr():
@@ -322,7 +322,7 @@ def test_listen_hello_does_not_replay_wake_up():
 
     apply_speech(lamp, "hello", Brain(), listen_mode=True)
     assert lamp.last_expression != "wake_up"
-    assert lamp.last_spoken == "I'm right here."
+    assert lamp.last_spoken == "I am here. You may continue."
 
 
 def test_show_stage_prints_current_stage(capsys):
@@ -387,7 +387,7 @@ def test_execute_lamp_tool_moves_and_lights():
         led_count=64,
         brightness=70,
     )
-    assert "Sure, that works for me." in execute_lamp_tool(lamp, "express", {"feeling": "nod"})
+    assert "Yes. That is correct." in execute_lamp_tool(lamp, "express", {"feeling": "nod"})
     assert lamp.last_expression == "nod"
     execute_lamp_tool(lamp, "set_mood", {"mood": "lights off"})
     assert lamp.last_rgb == (0, 0, 0)
@@ -428,14 +428,14 @@ def test_espeak_amplitude_is_loud():
     cmd = _espeak_cmd("/usr/bin/espeak-ng", "hello", 100)
     assert "-a" in cmd
     assert int(cmd[cmd.index("-a") + 1]) == 200
-    assert cmd[cmd.index("-v") + 1] == "en-us+f3"
-    assert cmd[cmd.index("-s") + 1] == "150"
-    assert cmd[cmd.index("-p") + 1] == "62"
+    assert cmd[cmd.index("-v") + 1] == "en-us+m2"
+    assert cmd[cmd.index("-s") + 1] == "165"
+    assert cmd[cmd.index("-p") + 1] == "48"
 
 
 def test_speak_text_sim_prints(capsys):
-    assert speak_text("Hi there. I'm your lamp.", sim=True) == "sim"
-    assert "[sim] speak Hi there. I'm your lamp." in capsys.readouterr().out
+    assert speak_text("Hello. I am the lamp.", sim=True) == "sim"
+    assert "[sim] speak Hello. I am the lamp." in capsys.readouterr().out
     assert speak_text("ignore me", sim=True, enabled=False) == ""
 
 
@@ -483,16 +483,16 @@ def test_espeak_english_voice(monkeypatch):
     monkeypatch.setattr(local_main.shutil, "which", fake_which)
     monkeypatch.setattr(local_main.subprocess, "run", fake_run)
     assert speak_text("Hello, I am the lamp.", sim=False, volume=100) == "espeak-ng"
-    assert calls[0][calls[0].index("-v") + 1] == "en-us+f3"
+    assert calls[0][calls[0].index("-v") + 1] == "en-us+m2"
 
 
 def test_main_sim_speak_without_cursor(capsys):
     from plugins.lelamp import local_main
 
-    assert local_main.main(["--sim", "--no-wake", "--speak", "Hi there. I'm your lamp."]) == 0
+    assert local_main.main(["--sim", "--no-wake", "--speak", "Hello. I am the lamp."]) == 0
     out = capsys.readouterr().out
     assert "stage 3" in out
-    assert "[sim] speak Hi there. I'm your lamp." in out
+    assert "[sim] speak Hello. I am the lamp." in out
 
 
 def test_english_keywords_parse_and_reply():
@@ -511,7 +511,7 @@ def test_english_keywords_parse_and_reply():
         led_count=64,
         brightness=70,
     )
-    assert "Sure, that works for me." in lamp.apply(parse_line("nod"))
+    assert "Yes. That is correct." in lamp.apply(parse_line("nod"))
     lamp.apply(parse_line("lights off"))
     assert lamp.last_rgb == (0, 0, 0)
 
@@ -519,7 +519,7 @@ def test_english_keywords_parse_and_reply():
 def test_english_helpers():
     assert speech_lang("what day is it") == "en"
     assert speech_lang("q") == "en"
-    assert wake_ack("hello lamp") == "I'm right here."
+    assert wake_ack("hello lamp") == "I am here. You may continue."
     assert utterance_too_short("hi") is True
     assert utterance_too_short("what day is it") is False
     assert pick_asr(("final", "ah"), ("final", "what day is it"))[1] == "what day is it"
