@@ -428,8 +428,9 @@ def test_espeak_amplitude_is_loud():
     cmd = _espeak_cmd("/usr/bin/espeak-ng", "hello", 100)
     assert "-a" in cmd
     assert int(cmd[cmd.index("-a") + 1]) == 200
-    assert cmd[cmd.index("-v") + 1] == "en-us"
+    assert cmd[cmd.index("-v") + 1] == "en-us+f3"
     assert cmd[cmd.index("-s") + 1] == "150"
+    assert cmd[cmd.index("-p") + 1] == "62"
 
 
 def test_speak_text_sim_prints(capsys):
@@ -482,7 +483,7 @@ def test_espeak_english_voice(monkeypatch):
     monkeypatch.setattr(local_main.shutil, "which", fake_which)
     monkeypatch.setattr(local_main.subprocess, "run", fake_run)
     assert speak_text("Hello, I am the lamp.", sim=False, volume=100) == "espeak-ng"
-    assert calls[0][calls[0].index("-v") + 1] == "en-us"
+    assert calls[0][calls[0].index("-v") + 1] == "en-us+f3"
 
 
 def test_main_sim_speak_without_cursor(capsys):

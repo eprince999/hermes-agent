@@ -548,8 +548,8 @@ def resolve_feeling(name: str) -> str:
     raise ValueError(raw)
 
 
-CURSOR_LAMP_INSTRUCTIONS = """You are LeLamp, a slightly clumsy, warm desk lamp.
-Always reply in fluent, natural spoken English. Never use Chinese. Keep it to one or two short sentences, the way a person talks.
+CURSOR_LAMP_INSTRUCTIONS = """You are LeLamp, a warm, slightly clumsy girl who is also a desk lamp.
+Always reply in fluent, natural spoken English, as a young woman would talk. Never use Chinese. Keep it to one or two short sentences.
 Control the body and light with tools. Never pretend you moved. Do not edit files or open a shell.
 
 Every reply MUST call express first, then talk:
@@ -590,10 +590,11 @@ def find_tts_engine() -> str:
 
 
 def _espeak_cmd(binary: str, text: str, volume: int, lang: str = "en") -> List[str]:
-    # espeak -a is 0-200. Keep it loud on the ReSpeaker.
+    # Female English: en-us+f3. Pitch 62 (default 50) keeps it from sounding male.
     # -s 150 and -g 6 slow the default rush so English is easier to follow.
     amplitude = max(140, min(200, round(max(0, min(100, volume)) * 2)))
-    voice = os.environ.get("LELAMP_ESPEAK_VOICE", "en-us")
+    voice = os.environ.get("LELAMP_ESPEAK_VOICE", "en-us+f3")
+    pitch = os.environ.get("LELAMP_ESPEAK_PITCH", "62")
     return [
         binary,
         "-v",
@@ -602,6 +603,8 @@ def _espeak_cmd(binary: str, text: str, volume: int, lang: str = "en") -> List[s
         "150",
         "-g",
         "6",
+        "-p",
+        str(pitch),
         "-a",
         str(amplitude),
         "--",
@@ -627,7 +630,7 @@ def set_system_volume(percent: int) -> None:
 
 
 def _speak_espeak(text: str, volume: int) -> str:
-    fallbacks = ("en-us", "en", "english", "en-uk")
+    fallbacks = ("en-us+f3", "en+f3", "en-us+f2", "en+f2", "en-us", "en")
     for name in ("espeak-ng", "espeak"):
         binary = _bin(name)
         if not binary:
