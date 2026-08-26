@@ -1,4 +1,4 @@
-"""LeLamp local agent — Stages 1–3, no OpenAI, no LiveKit.
+"""LeLamp local agent — Stages 1–3, no OpenAI, no LiveKit, no cloud LLM.
 
 Always copy onto the Pi as ``~/lelamp_runtime/local_main.py``.
 Do not rename the runnable file per stage. Snapshot instead::
@@ -14,18 +14,17 @@ Keep official ``main.py`` untouched. From the runtime repo root:
     sudo uv run python local_main.py --download-vosk
     sudo uv run python local_main.py --download-piper
     sudo uv run python local_main.py --snap
-    sudo uv run python local_main.py --ask "What do you see?"
+    sudo uv run python local_main.py --say "what do you see"
     sudo uv run python local_main.py --snapshot
 
-Stage 3 uses Cursor's official API (cursor-sdk + CURSOR_API_KEY from
-https://cursor.com/dashboard/api) and reads replies on the ReSpeaker
-with espeak-ng, or Piper neural TTS (``--download-piper``) which sounds
-like a person. No OpenAI TTS. Do not clone celebrity / TV voices.
+Stage 3 is on-device English Vosk plus keyword commands, then Piper
+(or espeak) on the ReSpeaker. Camera stills are local (``look`` /
+``--snap``). No Cursor / OpenAI chat. Do not clone celebrity / TV voices.
 
 Roadmap:
   1. keyboard + motors + RGB
   2. on-device speech keywords (Vosk)
-  3. Cursor API as the brain + speaker (this file)
+  3. Vosk + keywords + speaker + on-demand stills (this file)
 """
 
 from __future__ import annotations
@@ -51,7 +50,7 @@ from urllib.request import Request, urlopen, urlretrieve
 
 # Bump when a stage lands. Printed at startup so a snapshot is identifiable.
 AGENT_STAGE = 3
-AGENT_LABEL = "keyboard + vosk(en) + cursor-sdk + tts + cam"
+AGENT_LABEL = "keyboard + vosk(en) + keywords + tts + cam"
 
 
 def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = None) -> Path:
@@ -206,13 +205,12 @@ _EN_QUESTION_STARTS = {
     "do", "does", "can", "could", "is", "are", "please",
 }
 
-HELP_TEXT = """Stage 3 lamp (Cursor API + speaker, no OpenAI)
+HELP_TEXT = """Stage 3 lamp (Vosk + keywords, no cloud LLM)
 Motion: hello / nod / shake / curious / happy / idle
 Light: lights on / lights off / warm / cool / brighter / dimmer
 Speaker: louder / quieter / volume 100; test: --speak hello
 Voice: Piper companion (ryan) after --download-piper; espeak is fallback only
-Talk: say hello lamp once, then keep chatting.
-      Agree → nod. Disagree → shake head.
+Talk: say hello lamp once, then a keyword (nod, warm, lights off, look).
 Camera: look / what do you see / snap  (one still, not a live stream)
 Other: status  rgb 255 176 80  help  q
 """
@@ -332,7 +330,7 @@ def parse_line(line: str) -> Command:
             return Command("unknown", text, "Each RGB value has to be 0 to 255.")
         return Command("rgb", rgb, f"Color {rgb}")
 
-    if low in {"snap", "photo", "take a photo", "take a picture"}:
+    if low in {"snap", "photo", "take a photo", "take a picture"} or looks_like_look(low):
         return Command("snap", None, "I'm looking.")
 
     if text in LIGHT_ONLY or low in LIGHT_ONLY:
@@ -404,7 +402,7 @@ _CHAT_FILLERS = {"uh", "um", "ah", "er", "mm", "hmm", "mhm"}
 
 
 def hardware_spoken_command(transcript: str) -> Optional[str]:
-    """Lights, volume, quit — not feelings. Feelings go to Cursor to talk."""
+    """Lights, volume, quit — not motion keywords."""
     compact = _compact_speech(transcript)
     if not compact:
         return None
@@ -436,8 +434,8 @@ def looks_like_look(text: str) -> bool:
 def direct_spoken_command(transcript: str) -> Optional[str]:
     """Local command only when the utterance IS the command (plus please/can you).
 
-    Longer sentences go to Cursor so it can nod/shake from meaning, not
-    from a keyword buried in the sentence.
+    A keyword buried in a longer sentence is ignored so 'do you agree
+    warm light is nicer' does not fire nod or warm.
     """
     compact = _compact_speech(transcript)
     if not compact:
@@ -1540,20 +1538,8 @@ def dispatch_text(lamp: LocalLamp, raw: str, brain: Optional[CursorLampSession] 
         return "quit"
     if cmd.kind == "snap":
         path = lamp.snap()
-        if brain is not None:
-            reply = brain.ask("Look at the photo I just took. What do you see?", photo=path)
-            utter(lamp, reply)
-            return "chat"
         utter(lamp, cmd.reply if path else "I can't see right now.")
         return "snap"
-    if cmd.kind == "unknown" and brain is not None:
-        print("Cursor …")
-        reply = brain.ask(raw)
-        utter(lamp, reply)
-        return "chat"
-    text = lamp.apply(cmd)
-    utter(lamp, text, speak=cmd.kind not in {"help", "status", "noop"})
-    return cmd.kind
     text = lamp.apply(cmd)
     utter(lamp, text, speak=cmd.kind not in {"help", "status", "noop"})
     return cmd.kind
@@ -1574,18 +1560,6 @@ def apply_speech(
     if compact in _CHAT_FILLERS:
         utter(lamp, "Mm.")
         return "ack"
-    # With Cursor, only lights/volume/quit stay local. Chat — including
-    # nod, yeah, how are you — goes to the model so it can understand.
-    if brain is not None:
-        hardware = hardware_spoken_command(transcript)
-        if hardware:
-            if hardware != compact:
-                print(f"heard as: {hardware}")
-            return dispatch_text(lamp, hardware, None)
-        print("Cursor …")
-        reply = brain.ask(transcript)
-        utter(lamp, reply)
-        return "chat"
     phrase = direct_spoken_command(transcript)
     if phrase:
         if phrase != compact:
@@ -1623,10 +1597,10 @@ def run_listen_loop(
     catcher = SpeechCatcher(hold_s=hold_s)
     awake_until = 0.0
     if wake_word:
-        print("Mic on. Say hello lamp once; after I say yeah, keep talking.")
-        print("Short commands (lights off / nod) skip the wake word. Typing still works.")
+        print("Mic on. Say hello lamp once; after I say yeah, say a command.")
+        print("Short commands (lights off / nod / look) skip the wake word. Typing still works.")
     else:
-        print("Mic on (no wake word). Finish a full sentence. Short commands run immediately.")
+        print("Mic on (no wake word). Say a command. Short keywords run immediately.")
     try:
         while True:
             try:
@@ -1661,28 +1635,16 @@ def run_listen_loop(
                         _listen_settle(catcher, out_q)
                     ready = rest
                 if ready:
-                    local = (
-                        hardware_spoken_command(ready)
-                        if brain is not None
-                        else direct_spoken_command(ready)
-                    )
                     chatting = (not wake_word) or (time.monotonic() < awake_until)
-                    if local:
-                        if apply_speech(lamp, ready, brain, listen_mode=True) == "quit":
+                    local = direct_spoken_command(ready)
+                    if local or chatting:
+                        if apply_speech(lamp, ready, listen_mode=True) == "quit":
                             return 0
                         _listen_settle(catcher, out_q)
                         if chatting:
                             awake_until = time.monotonic() + session_s
-                    elif chatting:
-                        if brain is None and utterance_too_short(ready):
-                            print(f"(too short for the model: {ready})")
-                        elif apply_speech(lamp, ready, brain, listen_mode=True) == "quit":
-                            return 0
-                        else:
-                            _listen_settle(catcher, out_q)
-                            awake_until = time.monotonic() + session_s
                     else:
-                        print("Say hello lamp first, then keep chatting.")
+                        print("Say hello lamp first, then a command (nod, warm, lights off, look).")
             if select.select([sys.stdin], [], [], 0)[0]:
                 line = sys.stdin.readline()
                 if line == "":
@@ -1818,7 +1780,7 @@ class LocalLamp:
             if wait:
                 play_fn(recording)
                 return
-            # Conversation path: nod while Cursor writes the spoken line.
+            # Conversation path: nod in the background while TTS starts.
             thread = threading.Thread(
                 target=play_fn,
                 args=(recording,),
@@ -1926,7 +1888,7 @@ class LocalLamp:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="LeLamp local Stages 1–3 (Cursor API + speaker, no OpenAI)")
+    parser = argparse.ArgumentParser(description="LeLamp local Stages 1–3 (Vosk + keywords, no cloud LLM)")
     parser.add_argument("--sim", action="store_true", help="no motors/LED, print actions")
     parser.add_argument("--port", default=os.environ.get("LELAMP_PORT", "/dev/ttyACM0"))
     parser.add_argument("--id", dest="lamp_id", default=os.environ.get("LELAMP_ID", "lelamp"))
@@ -1952,9 +1914,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", type=int, default=None, help="sounddevice input index")
     parser.add_argument("--model", type=Path, default=None, help="path to vosk-model-small-en-us-0.15")
     parser.add_argument("--en-model", type=Path, default=None, help="alias for --model")
-    parser.add_argument("--ask", action="append", default=[], help="send one sentence to Cursor API (repeatable)")
-    parser.add_argument("--snap", action="store_true", help="take one camera still and exit (unless --listen/--ask)")
-    parser.add_argument("--no-cursor", action="store_true", help="never call Cursor, even if CURSOR_API_KEY is set")
+    parser.add_argument("--ask", action="append", default=[], help="same as --say (keyword command, repeatable)")
+    parser.add_argument("--snap", action="store_true", help="take one camera still and exit (unless --listen/--say)")
+    parser.add_argument("--no-cursor", action="store_true", help="ignored; this stage never calls a cloud LLM")
     parser.add_argument("--show-stage", action="store_true", help="print stage number and exit")
     parser.add_argument(
         "--snapshot",
@@ -1987,8 +1949,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     print(describe_tts())
     print(describe_camera(sim=args.sim))
-    if args.ask and args.no_cursor:
-        raise SystemExit("--ask needs Cursor. Remove --no-cursor and set CURSOR_API_KEY.")
     lamp = LocalLamp(
         sim=args.sim,
         port=args.port,
@@ -1997,13 +1957,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         brightness=70,
         speak_enabled=not args.no_speak,
     )
-    brain = None
-    if not args.no_cursor and (args.ask or os.environ.get("CURSOR_API_KEY")):
-        brain = CursorLampSession(lamp)
-    if brain is not None:
-        print("talk: Cursor will understand you (same model API as this chat)")
-    else:
-        print("talk: local commands only. Put CURSOR_API_KEY=crsr_... in .env to chat.")
+    print("talk: Vosk + keywords. hello / nod / warm / lights off / look / q")
     voice_warm = None
     if not args.sim:
         voice_warm = threading.Thread(target=warm_tts, daemon=True, name="lelamp-voice")
@@ -2011,8 +1965,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     lamp.start()
     if voice_warm is not None:
         voice_warm.join(timeout=20)
-    if brain is not None and (args.listen or args.ask):
-        brain.start()
     try:
         if not args.no_wake:
             lamp.wake()
@@ -2024,13 +1976,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 return 0
         for phrase in args.speak:
             lamp.speak(phrase)
-        for phrase in args.say:
-            if apply_speech(lamp, phrase, brain) == "quit":
+        for phrase in list(args.say) + list(args.ask):
+            if apply_speech(lamp, phrase) == "quit":
                 return 0
-        for text in args.ask:
-            print(f"you: {text}")
-            reply = brain.ask(text) if brain is not None else ""
-            utter(lamp, reply)
         if (args.say or args.ask or args.speak) and not args.listen:
             return 0
         if args.listen:
@@ -2040,7 +1988,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 device=args.device,
                 model_path=Path(model_path),
                 en_model_path=None,
-                brain=brain,
                 wake_word=not args.no_wake_word,
                 hold_s=args.listen_hold,
             )
@@ -2051,11 +1998,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 print()
                 print("Okay. I'll be right here.")
                 return 0
-            if dispatch_text(lamp, raw, brain) == "quit":
+            if dispatch_text(lamp, raw) == "quit":
                 return 0
     finally:
-        if brain is not None:
-            brain.close()
         lamp.stop()
     return 0
 

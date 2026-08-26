@@ -229,7 +229,7 @@ def test_express_tool_nods_on_agree_feeling():
     assert lamp.last_expression == "headshake"
 
 
-def test_long_speech_goes_to_cursor_not_keyword_snip():
+def test_long_speech_does_not_snip_a_buried_keyword():
     lamp = LocalLamp(
         sim=True,
         port="/dev/null",
@@ -245,8 +245,8 @@ def test_long_speech_goes_to_cursor_not_keyword_snip():
             return "Sure, I agree."
 
     result = apply_speech(lamp, "Do you agree warm light is nicer", Brain())
-    assert result == "chat"
-    assert seen == ["Do you agree warm light is nicer"]
+    assert result == "unknown"
+    assert seen == []
     assert lamp.last_expression != "nod"
 
 
@@ -261,13 +261,13 @@ def test_short_keyword_speech_stays_local():
 
     class Brain:
         def ask(self, text):
-            raise AssertionError("lights off should not call Cursor")
+            raise AssertionError("lights off should not call a model")
 
     apply_speech(lamp, "lights off", Brain())
     assert lamp.last_rgb == (0, 0, 0)
 
 
-def test_spoken_chat_goes_to_cursor_not_canned_nod():
+def test_spoken_keywords_stay_local_unknown_is_ignored():
     lamp = LocalLamp(
         sim=True,
         port="/dev/null",
@@ -282,10 +282,11 @@ def test_spoken_chat_goes_to_cursor_not_canned_nod():
             seen.append(text)
             return "Yeah, I'm here."
 
-    assert apply_speech(lamp, "nod", Brain()) == "chat"
-    assert apply_speech(lamp, "how are you", Brain()) == "chat"
-    assert apply_speech(lamp, "yeah I like the warm light", Brain()) == "chat"
-    assert seen == ["nod", "how are you", "yeah I like the warm light"]
+    assert apply_speech(lamp, "nod", Brain()) == "express"
+    assert lamp.last_expression == "nod"
+    assert apply_speech(lamp, "how are you", Brain()) == "unknown"
+    assert apply_speech(lamp, "yeah I like the warm light", Brain()) == "unknown"
+    assert seen == []
 
 
 def test_join_speech_glues_vosk_fragments():
@@ -523,6 +524,29 @@ def test_main_sim_speak_without_cursor(capsys):
     out = capsys.readouterr().out
     assert "stage 3" in out
     assert "[sim] speak Hey. I'm here with you." in out
+    assert "Vosk + keywords" in out
+    assert "Cursor will understand" not in out
+
+
+def test_main_ignores_cursor_api_key(monkeypatch, capsys):
+    from plugins.lelamp import local_main
+
+    monkeypatch.setenv("CURSOR_API_KEY", "crsr_fake_key")
+    assert local_main.main(["--sim", "--no-wake", "--say", "nod"]) == 0
+    out = capsys.readouterr().out
+    assert "play nod" in out
+    assert "Yeah." in out
+    assert "Cursor will understand" not in out
+    assert "cursor-sdk" not in out
+
+
+def test_main_sim_ask_is_a_keyword(capsys):
+    from plugins.lelamp import local_main
+
+    assert local_main.main(["--sim", "--no-wake", "--ask", "warm light"]) == 0
+    out = capsys.readouterr().out
+    assert "Warm light." in out
+    assert "Cursor …" not in out
 
 
 def test_english_keywords_parse_and_reply():
@@ -820,7 +844,7 @@ def test_look_tool_uses_sim_camera():
     assert lamp.last_expression == "scanning"
 
 
-def test_what_do_you_see_goes_to_cursor():
+def test_what_do_you_see_snaps_locally():
     lamp = LocalLamp(
         sim=True,
         port="/dev/null",
@@ -835,8 +859,12 @@ def test_what_do_you_see_goes_to_cursor():
             seen.append(text)
             return "I see you."
 
-    assert apply_speech(lamp, "what do you see", Brain()) == "chat"
-    assert seen == ["what do you see"]
+    assert parse_line("what do you see").kind == "snap"
+    assert parse_line("look").kind == "snap"
+    assert apply_speech(lamp, "what do you see", Brain()) == "snap"
+    assert seen == []
+    assert lamp.last_photo
+    assert lamp.last_expression == "scanning"
 
 
 def test_main_sim_snap(capsys):

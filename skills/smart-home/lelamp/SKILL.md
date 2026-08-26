@@ -48,9 +48,9 @@ Keep the runnable name `local_main.py`. After a stage works, run `sudo uv run py
 
 Stage 1 (keyboard, no cloud): `sudo uv run python local_main.py`. Type `hello` / `nod` / `warm` / `lights off`. `--sim` prints actions without servos.
 
-Stage 2 (ReSpeaker, English): `uv add vosk`, then `--download-vosk` (English small model) and `--listen`. Say **hello lamp** once; after Yeah?, keep chatting. Short commands (`lights off`, `nod`, `yeah`) skip the wake word. `--no-wake-word` opens the mic. Mapping without a mic: `--say "lights off"`.
+Stage 2 (ReSpeaker, English): `uv add vosk`, then `--download-vosk` (English small model) and `--listen`. Say **hello lamp** once; after Yeah?, say a keyword. Short commands (`lights off`, `nod`, `yeah`) skip the wake word. `--no-wake-word` opens the mic. Mapping without a mic: `--say "lights off"`.
 
-Stage 3 (Cursor API + speaker): put `CURSOR_API_KEY=crsr_...` in `~/lelamp_runtime/.env` (key from https://cursor.com/dashboard/api). `uv add cursor-sdk piper-tts`, then `sudo uv run python local_main.py --download-piper`. Chat (including how are you / yeah / opinions) goes to the Cursor model on the same agent session so it can understand and remember. Only lights, volume, and quit stay local. Camera is on-demand stills (`look` / `--snap`), not a live stream, so listen/speak keep the Pi. Test with `--listen`, `--sim --snap`, or `--sim --ask "Do you agree warm light is nicer?"`. `--no-speak` prints only. This is cursor-sdk, not a DeepSeek/OpenAI chat URL. Do not clone celebrity or TV voices.
+Stage 3 (Vosk + keywords + speaker): `uv add vosk piper-tts`, then `--download-vosk` and `--download-piper`. Speech is on-device English Vosk. Only keyword commands run (`hello`, `nod`, `yeah`, `shake`, `warm`, `lights off`, `look` / `what do you see` / `snap`). Unknown sentences are ignored — there is no cloud LLM. Camera is on-demand stills (`look` / `--snap`), not a live stream. Test with `--listen`, `--sim --snap`, or `--sim --say "what do you see"`. `--no-speak` prints only. Do not clone celebrity or TV voices.
 
 The LiveKit + OpenAI Realtime path is optional later: copy `plugins/lelamp/runtime_main.py` over `~/lelamp_runtime/main.py`, put `OPENAI_API_KEY` in `.env`, then `sudo uv run main.py console`.
 
@@ -100,9 +100,9 @@ Official recordings: `wake_up`, `nod`, `headshake`, `curious`, `scanning`, `exci
 
 - Do not invent recording names. Unknown expressions are rejected before any servo moves.
 - Do not fully spin the base yaw or head yaw past about ±90° from center during calibration.
-- Pi Zero 2W cannot run the LLM locally. `main.py` uses OpenAI Realtime in the cloud; the Pi only does mic, speaker, servos, and LEDs. Put `OPENAI_API_KEY` in `~/lelamp_runtime/.env`. `sudo` drops shell exports; a missing key crashes at `RealtimeModel`.
+- Pi Zero 2W cannot run a cloud LLM locally either; this stage does not try. `local_main.py` uses Vosk keywords plus Piper/espeak. Leave official `main.py` (OpenAI Realtime) untouched.
 - One Raspberry Pi should run only this lamp's runtime while you talk to it.
-- Stage 3 uses `CURSOR_API_KEY` + `cursor-sdk` local agents with custom lamp tools. Cloud Agents cannot move Pi GPIO. There is no public Cursor `/v1/chat/completions`.
+- Stage 3 does not use `CURSOR_API_KEY` or cursor-sdk. Cloud Agents cannot move Pi GPIO.
 
 ## Verification
 
