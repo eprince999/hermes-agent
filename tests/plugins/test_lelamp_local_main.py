@@ -386,6 +386,22 @@ def test_snapshot_saves_current_stage_copy(tmp_path, capsys):
     assert args.snapshot == "stage2"
 
 
+def test_tracked_stage_snapshots_keep_dance_on_stage4():
+    root = (
+        Path(__file__).resolve().parents[2]
+        / "plugins"
+        / "lelamp"
+        / "lamp_snapshots"
+    )
+    stage3 = (root / "stage3.py").read_text(encoding="utf-8")
+    stage4 = (root / "stage4.py").read_text(encoding="utf-8")
+    assert "AGENT_STAGE = 3" in stage3
+    assert "def play_music" not in stage3
+    assert "AGENT_STAGE = 4" in stage4
+    assert "def play_music" in stage4
+    assert "MUSIC_START" in stage4
+
+
 def test_main_sim_say_phrases_without_repl(capsys):
     from plugins.lelamp import local_main
 

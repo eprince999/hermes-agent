@@ -138,8 +138,9 @@ RELEASE_v*.md
 # walkthroughs). Throwaway artifacts, never part of the app.
 apps/desktop/demo/
 
-# LeLamp Pi-side snapshots (created by local_main.py --snapshot)
-plugins/lelamp/lamp_snapshots/
+# Scratch copies from local_main.py --snapshot. Named stage archives stay tracked.
+plugins/lelamp/lamp_snapshots/*
+!plugins/lelamp/lamp_snapshots/stage*.py
 
 # LeLamp generated beat loops (written next to local_main.py on the Pi)
 plugins/lelamp/music/
