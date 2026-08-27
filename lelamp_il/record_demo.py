@@ -214,39 +214,54 @@ class PiOrWebcam(CameraSource):
         self._handle = None
 
     def connect(self) -> str:
+        errors: list[str] = []
+
         try:
             from picamera2 import Picamera2
 
             cam = Picamera2()
-            cam.configure(
-                cam.create_preview_configuration(
-                    main={"size": (self.width, self.height), "format": "RGB888"}
-                )
+            config = cam.create_preview_configuration(
+                main={"size": (self.width, self.height), "format": "RGB888"}
             )
+            cam.configure(config)
             cam.start()
             time.sleep(0.4)
             self._kind, self._handle = "picamera2", cam
             return f"Pi Camera {self.width}x{self.height}"
-        except Exception:
-            pass
+        except Exception as exc:
+            errors.append(f"picamera2: {exc}")
+
         try:
             import cv2
 
-            cap = cv2.VideoCapture(self.index)
-            if not cap.isOpened():
-                raise RuntimeError(f"打不开摄像头 index={self.index}")
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-            ok, _ = cap.read()
-            if not ok:
-                cap.release()
-                raise RuntimeError("摄像头读不到画面")
-            self._kind, self._handle = "cv2", cap
-            return f"OpenCV 摄像头 {self.index}"
+            candidates = [self.index, 0, 1, 2]
+            seen: set[int] = set()
+            for idx in candidates:
+                if idx in seen:
+                    continue
+                seen.add(idx)
+                cap = cv2.VideoCapture(idx)
+                if not cap.isOpened():
+                    cap.release()
+                    continue
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+                ok, _ = cap.read()
+                if not ok:
+                    cap.release()
+                    continue
+                self._kind, self._handle = "cv2", cap
+                return f"OpenCV 摄像头 {idx}"
+            errors.append("opencv: /dev/video0-2 都打不开（CSI 灯头相机通常不能这样开）")
         except Exception as exc:
-            raise RuntimeError(
-                f"没有摄像头可用 ({exc}). 装 opencv-python 或 picamera2，或加 --dummy。"
-            ) from exc
+            errors.append(f"opencv: {exc}")
+
+        hint = (
+            "灯头是 CSI 相机，需要系统包 picamera2，并且 venv 要能看到它：\n"
+            "  sudo apt install -y python3-picamera2\n"
+            "  然后把 .venv/pyvenv.cfg 里 include-system-site-packages 改成 true"
+        )
+        raise RuntimeError("没有摄像头可用。\n  - " + "\n  - ".join(errors) + "\n" + hint)
 
     def grab(self) -> Image.Image:
         if self._kind == "picamera2":
