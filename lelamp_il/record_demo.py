@@ -279,10 +279,13 @@ class PiOrWebcam(CameraSource):
             errors.append(f"opencv: {exc}")
 
         hint = (
-            "Camera Module 3 要用系统 picamera2：\n"
-            "  sudo apt install -y python3-picamera2\n"
-            "  编辑 ~/lelamp_runtime/.venv/pyvenv.cfg\n"
-            "  把 include-system-site-packages 改成 true"
+            "Camera Module 3 要用系统 picamera2（不要 pip install）：\n"
+            "  echo 'Acquire::ForceIPv4 \"true\";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4\n"
+            "  sudo apt-get update && sudo apt-get install -y python3-picamera2 python3-libcamera\n"
+            "  /usr/bin/python3 -c \"from picamera2 import Picamera2; print('system ok')\"\n"
+            "  编辑 ~/lelamp_runtime/.venv/pyvenv.cfg：include-system-site-packages = true\n"
+            "  deactivate 后再 source 进 venv，重新 import\n"
+            "  或直接跑：bash enable_pi_camera.sh"
         )
         raise RuntimeError("没有摄像头可用。\n  - " + "\n  - ".join(errors) + "\n" + hint)
 

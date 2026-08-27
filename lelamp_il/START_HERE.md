@@ -47,8 +47,41 @@ rm -rf ~/.cache/pip
 
 # 换成官方 runtime 的环境（路径按你机器上实际位置改）
 source ~/lelamp_runtime/.venv/bin/activate   # 或 venv/
-pip install -r ~/hermes-agent/lelamp_il/requirements-record.txt
+python3 -m pip install pillow
+```
 
+**Camera Module 3 必须用系统 `picamera2`，不能 `pip install picamera2`。**  
+`(lelamp-runtime)` 是隔离虚拟环境：系统没装包，或 venv 看不见系统包，都会报 `No module named 'picamera2'`。`dpkg -l ... | grep ^ii` 没有输出 = 系统包也没装。
+
+在灯上跑一次（会改 apt 为 IPv4，避免之前的 Debian IPv6 404）：
+
+```bash
+# 先 git pull 拿到脚本，然后：
+cd ~/hermes-agent/lelamp_il
+bash enable_pi_camera.sh
+```
+
+或手动做同样的事：
+
+```bash
+echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
+sudo apt-get update
+sudo apt-get install -y python3-picamera2 python3-libcamera
+/usr/bin/python3 -c "from picamera2 import Picamera2; print('system picamera2 ok')"
+
+# 让官方 runtime 的 venv 能 import 系统包
+sed -i 's/^include-system-site-packages = .*/include-system-site-packages = true/' \
+  ~/lelamp_runtime/.venv/pyvenv.cfg
+# 若文件在 venv/ 而不是 .venv/，改路径后再跑一次 sed
+
+deactivate
+source ~/lelamp_runtime/.venv/bin/activate
+python3 -c "from picamera2 import Picamera2; print('venv picamera2 ok')"
+```
+
+确认 `venv picamera2 ok` 之后再录（不要用 `--dummy`）：
+
+```bash
 cd ~/hermes-agent/lelamp_il
 python record_demo.py --task look_at_person --port /dev/ttyACM0 --id lelamp \
     --episodes 2 --seconds 6
@@ -59,9 +92,9 @@ python record_demo.py --task look_at_person --port /dev/ttyACM0 --id lelamp \
 ## 第 3 件事：用手教它「看我」（先 2 段试通，再 50 段）
 
 ```bash
-# 树莓派上，语音已停
-cd ~/lelamp/lelamp_il
-source .venv/bin/activate   # 树莓派若只录、不训，至少 pip install pillow
+# 树莓派上，语音已停，且上一步 venv 已能 import picamera2
+cd ~/hermes-agent/lelamp_il
+source ~/lelamp_runtime/.venv/bin/activate
 python record_demo.py --task look_at_person --port /dev/ttyACM0 --id lelamp \
     --episodes 2 --seconds 6
 ```
