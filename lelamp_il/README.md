@@ -1,4 +1,8 @@
-# LeLamp Tiny Policy — 笔记本训练，树莓派 Zero 2W 部署
+# LeLamp Tiny Policy — 接在已经会听中文、放音乐、做动作的灯上
+
+**已有能说话的灯：先读 [`START_HERE.md`](START_HERE.md)。** 不要重新组装、不要卸语音。
+
+模仿学习只补「看见人再转头」。音乐、中文指令、点头动画继续用你现在的 agent。
 
 可以。流程是：**笔记本（或任何带 PyTorch 的机器）训练 → 导出 ONNX/INT8 → `scp` 到 Zero 2W 上跑闭环**。
 

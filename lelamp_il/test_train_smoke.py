@@ -154,6 +154,13 @@ def test_record_dummy_then_load(tmp_path: Path) -> None:
     assert samples[0].frame is not None
 
 
+def test_guess_port_does_not_raise() -> None:
+    from record_demo import guess_port, warn_stop_voice_agent
+
+    warn_stop_voice_agent(None)
+    guess_port()
+
+
 if __name__ == "__main__":
     import tempfile
 
@@ -165,4 +172,5 @@ if __name__ == "__main__":
         test_onnx_export(tmp / "onnx")
         test_synthetic_train(tmp / "train")
         test_record_dummy_then_load(tmp / "record")
+        test_guess_port_does_not_raise()
     print("ok")

@@ -27,6 +27,7 @@ import argparse
 import csv
 import math
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -41,11 +42,54 @@ JOINT_NAMES = (
     "wrist_pitch",
 )
 CSV_FIELDS = ["timestamp"] + [f"{name}.pos" for name in JOINT_NAMES]
+COMMON_PORTS = (
+    "/dev/ttyACM0",
+    "/dev/ttyUSB0",
+    "/dev/ttyAMA0",
+    "/dev/tty.usbmodem",
+)
 
 
 # ---------------------------------------------------------------------------
 # Hardware adapters (real lamp if present, otherwise dummy)
 # ---------------------------------------------------------------------------
+
+
+def guess_port() -> str | None:
+    for path in COMMON_PORTS:
+        if path.endswith("usbmodem"):
+            matches = sorted(Path("/dev").glob("tty.usbmodem*"))
+            if matches:
+                return str(matches[0])
+            continue
+        if Path(path).exists():
+            return path
+    return None
+
+
+def port_users(port: str) -> str:
+    try:
+        result = subprocess.run(
+            ["fuser", port],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    return (result.stdout or result.stderr or "").strip()
+
+
+def warn_stop_voice_agent(port: str | None) -> None:
+    print("录制前先停掉正在跑的语音/音乐程序（它占着舵机串口和摄像头）。")
+    print("  sudo systemctl stop lelamp.service")
+    print("  或在 main.py / console 那个终端按 Ctrl-C")
+    print("放音乐、中文指令、点头动画都保留，录完再开回去。")
+    if port:
+        users = port_users(port)
+        if users:
+            print(f"警告: {port} 仍被占用: {users}  —— 不停掉会连不上舵机。")
+    print()
 
 
 class JointSource:
@@ -319,7 +363,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--task", default="look_at_person", help="任务名，数据写到 data/<task>/")
     p.add_argument("--out", type=Path, default=Path("data"), help="数据根目录")
-    p.add_argument("--port", default=None, help="Feetech 串口，如 /dev/ttyUSB0 或 /dev/ttyACM0")
+    p.add_argument("--port", default=None, help="Feetech 串口。省略则尝试 /dev/ttyACM0 或 /dev/ttyUSB0")
     p.add_argument("--id", default="lelamp", help="灯的校准 id，需与 calibrate 时一致")
     p.add_argument("--camera", type=int, default=0, help="OpenCV 摄像头编号")
     p.add_argument("--width", type=int, default=320)
@@ -347,27 +391,34 @@ def main(argv: list[str] | None = None) -> int:
     task_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
-    print("LeLamp 示教录制：你动手，程序记账")
+    print("LeLamp 示教录制（接在已有中文语音灯上，只补「看人」）")
     print("=" * 60)
     print(
-        "每一段你要做的事：\n"
-        "  1. 人（或手）站到一个位置\n"
-        "  2. 倒计时结束后，用手把灯头转到看着目标\n"
-        "  3. 保持几秒，让画面和关节一起被写进同一段\n"
-        "不要先摆完再拍照——必须边摆边录。\n"
+        "你的灯已有：中文指令、放音乐、点头/摇头等动画。这些都不要卸。\n"
+        "这一段只录「看我」：你用手把灯头转到人脸，程序同时存图和关节。\n"
+        "每一段：人站好 → Enter → 倒计时结束 → 用手把灯头转向人脸，保持几秒。\n"
     )
     print(f"任务目录: {task_dir}")
     print(f"计划: {args.episodes} 段 × {args.seconds} 秒 @ {args.fps} fps")
     print()
 
+    port = args.port
+    if not args.dummy:
+        if port is None:
+            port = guess_port()
+        if port is None:
+            print(
+                "error: 找不到串口。用 --port /dev/ttyACM0 或 --port /dev/ttyUSB0",
+                file=sys.stderr,
+            )
+            return 2
+        warn_stop_voice_agent(port)
+
     print("步骤 1/4  连接舵机并关闭力矩（这样你才能用手掰）")
     if args.dummy:
         joint_src: JointSource = DummyJoints()
     else:
-        if not args.port:
-            print("error: 真实录制需要 --port /dev/ttyUSB0（或加 --dummy）", file=sys.stderr)
-            return 2
-        joint_src = LeLampJoints(args.port, args.id)
+        joint_src = LeLampJoints(port, args.id)
     print("   ", joint_src.connect())
 
     print("步骤 2/4  打开灯头摄像头（模型要看灯自己看见的画面）")
