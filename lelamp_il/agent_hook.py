@@ -1,22 +1,15 @@
 #!/usr/bin/env python3
-"""Hook a trained look-at policy into an existing LeLamp LiveKit agent.
+"""Look-at policy used by plugins/lelamp/local_main.py.
 
-Do not replace play_recording, RGB, volume, or music. Add one extra tool:
+Do not replace play_recording, RGB, volume, or music. local_main.py already
+maps 「看我」 to run_watch_person(). Copy artifacts next to lelamp_il/:
 
-    from agent_hook import run_watch_person, WATCH_PERSON_PROMPT
+    tiny_lamp_int8.onnx
+    meta.json
 
-    @function_tool
-    async def watch_person(self, seconds: int = 6) -> str:
-        \"\"\"Look at the person visible in the head camera.\"\"\"
-        return run_watch_person(
-            model=Path("artifacts/tiny_lamp_int8.onnx"),
-            meta=Path("artifacts/meta.json"),
-            port="/dev/ttyACM0",
-            seconds=seconds,
-        )
-
-Paste WATCH_PERSON_PROMPT into the agent instructions (Chinese + English).
-Stop the canned scan/nod from being used for 「看我」.
+The LiveKit function-tool snippet below is only a fallback if someone is
+still on official main.py. The lamp that already speaks Chinese should stay
+on local_main.py.
 """
 
 from __future__ import annotations

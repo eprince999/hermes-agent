@@ -3,12 +3,13 @@
 不要重装、不要重新校准、不要把语音 agent 卸掉。  
 模仿学习只补一件官方动画做不到的事：**看见人在哪，再把灯头转过去。**
 
-放音乐、中文指令、点头/摇头/开心扭，全部继续走你现在的 `play_recording` / 音量 / LiveKit。
+灯上真正在跑的是 `plugins/lelamp/local_main.py`（拷到 `~/lelamp_runtime/local_main.py`）：中文 Vosk、音乐、点头/摇头。  
+**不要另写一套 LiveKit agent。** 「看我」已经接到这份 `local_main.py` 上。录数据用 `lelamp_il/record_demo.py`，笔记本训练用 `lelamp_il/train.py`，训好的 ONNX 再给同一份 `local_main.py` 用。
 
 ```
-中文语音（你已有） ──「放首歌」──► 音乐，不动策略
-                 ──「点头」  ──► play_recording("nod")
-                 ──「看我」  ──► 本次要训的视觉策略
+中文语音（local_main.py） ──「放首歌」──► 音乐，不动策略
+                         ──「点头」  ──► play_recording("nod")
+                         ──「看我」  ──► 本次要训的视觉策略
 ```
 
 舵机串口和摄像头同时只能被一个程序占用。所以：**录制和训练时先停语音；用的时候再开回去。**
@@ -137,16 +138,21 @@ python infer_pi.py --model artifacts/tiny_lamp_int8.onnx --meta artifacts/meta.j
     --port /dev/ttyACM0 --steps 60
 ```
 
-然后把 `agent_hook.py` 里的 `watch_person` 加进你现有的 LiveKit Agent（和 `play_recording` 并列）。系统提示加一句：
+然后把训好的模型拷回灯，覆盖 runtime 里的 `local_main.py`（仓库里这份已经接上「看我」）：
 
-- 用户说「看我 / 看着我 / 看这边」→ 调用 `watch_person`
-- 「点头 / 摇头 / 开心」→ 继续 `play_recording`
-- 「放音乐 / 大声一点」→ 继续你现在的音乐和音量工具
+```bash
+scp artifacts/tiny_lamp_int8.onnx artifacts/meta.json pi@lamp:~/hermes-agent/lelamp_il/artifacts/
+# 在灯上：
+cp ~/hermes-agent/plugins/lelamp/local_main.py ~/lelamp_runtime/local_main.py
+```
+
+「看我 / 看着我 / 看过来」走视觉策略；「点头 / 摇头 / 开心」继续 canned 动画；「放音乐 / 大声一点」继续音乐。不要另接一套 LiveKit agent。
 
 最后再开语音：
 
 ```bash
-sudo systemctl start lelamp.service
+cd ~/lelamp_runtime
+sudo uv run python local_main.py --listen
 ```
 
 ---

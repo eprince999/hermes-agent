@@ -33,11 +33,11 @@ def test_local_main_does_not_import_openai_or_livekit():
     assert "realtimemodel" not in lowered
 
 
-def test_stage3_keeps_chinese_vosk():
+def test_stage4_keeps_chinese_vosk():
     source = _source()
     from plugins.lelamp import local_main
 
-    assert local_main.AGENT_STAGE == 3
+    assert local_main.AGENT_STAGE == 4
     assert local_main.VOSK_MODEL_NAME == "vosk-model-small-cn-0.22"
     assert "vosk-model-small-en" not in source
 
@@ -46,6 +46,35 @@ def test_hello_is_wake_up_not_a_light_command():
     cmd = parse_line("你好")
     assert cmd.kind == "express"
     assert cmd.payload == "wake_up"
+
+
+def test_watch_me_is_not_scanning_or_nod():
+    cmd = parse_line("看我")
+    assert cmd.kind == "watch_person"
+    assert parse_line("看着我").kind == "watch_person"
+    assert parse_line("看过来").kind == "watch_person"
+    assert parse_line("点头").kind == "express"
+    assert parse_line("点头").payload == "nod"
+    scanning = parse_line("张望")
+    assert scanning.kind == "express"
+    assert scanning.payload == "scanning"
+    spoken = extract_spoken_command("请看我")
+    assert spoken
+    assert parse_line(spoken).kind == "watch_person"
+
+
+def test_sim_watch_person_does_not_play_a_recording():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    out = lamp.apply(parse_line("看我"))
+    assert "看着你" in out
+    assert lamp.last_expression == "watch_person"
+    assert lamp.last_rgb != (0, 0, 0)
 
 
 def test_off_is_light_only_not_headshake():
@@ -141,18 +170,18 @@ def test_show_stage_prints_current_stage(capsys):
     assert out.startswith(str(local_main.AGENT_STAGE))
 
 
-def test_snapshot_saves_stage3_copy(tmp_path, capsys):
+def test_snapshot_saves_stage4_copy(tmp_path, capsys):
     from plugins.lelamp import local_main
 
-    dest = local_main.snapshot_current("stage3", dest_dir=tmp_path)
-    assert dest.name == "stage3.py"
+    dest = local_main.snapshot_current("stage4", dest_dir=tmp_path)
+    assert dest.name == "stage4.py"
     assert dest.is_file()
-    assert "AGENT_STAGE = 3" in dest.read_text(encoding="utf-8")
+    assert f"AGENT_STAGE = {local_main.AGENT_STAGE}" in dest.read_text(encoding="utf-8")
     assert "saved snapshot" in capsys.readouterr().out
     args = local_main.build_parser().parse_args(["--snapshot"])
     assert args.snapshot == ""
-    args = local_main.build_parser().parse_args(["--snapshot", "stage3"])
-    assert args.snapshot == "stage3"
+    args = local_main.build_parser().parse_args(["--snapshot", "stage4"])
+    assert args.snapshot == "stage4"
 
 
 def test_tracked_stage2_archive_has_no_music_player():
@@ -167,13 +196,19 @@ def test_tracked_stage2_archive_has_no_music_player():
     assert "vosk-model-small-cn-0.22" in stage2
     assert "def play_music" not in stage2
     stage3 = (root / "stage3.py").read_text(encoding="utf-8")
+    stage4 = (root / "stage4.py").read_text(encoding="utf-8")
     runnable = (root.parent / "local_main.py").read_text(encoding="utf-8")
     assert "AGENT_STAGE = 3" in stage3
     assert "def play_music" in stage3
     assert "vosk-model-small-cn-0.22" in stage3
     assert "def _start_player" in stage3
-    assert stage3 == runnable
-    assert not (root / "stage4.py").is_file()
+    assert "watch_person" not in stage3
+    assert "AGENT_STAGE = 4" in runnable
+    assert "看我" in runnable
+    assert "def watch_person" in runnable
+    assert stage4 == runnable
+    assert stage3 != runnable
+    assert not (root / "stage5.py").is_file()
 
 
 def test_main_sim_say_phrases_without_repl(capsys):

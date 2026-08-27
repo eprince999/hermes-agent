@@ -44,15 +44,23 @@ LeLamp is a 5V lamp. Use the 5V 2A supplies from the assembly guide.
 
 If the lamp is already assembled, copy `plugins/lelamp/local_main.py` to `~/lelamp_runtime/local_main.py`.
 
-Keep the runnable name `local_main.py`. Snapshot 2 (Chinese Vosk keywords only) is archived at `plugins/lelamp/lamp_snapshots/stage2.py`. The runnable file is snapshot 2 plus a `music/` folder. Copy the snapshot back over `local_main.py` to roll back. Do not invent `local_main_v2.py` as the launcher. Stages 3 and 4 (English Cursor) stay deleted.
+Keep the runnable name `local_main.py`. Snapshots live next to it:
+
+- `lamp_snapshots/stage2.py` — Chinese Vosk keywords only
+- `lamp_snapshots/stage3.py` — music folder + volume/loop
+- `lamp_snapshots/stage4.py` — current runnable, adds **看我** look-at
+
+Copy a snapshot back over `local_main.py` to roll back. Do not invent `local_main_v2.py` as the launcher.
 
 Stage 1 (keyboard, no cloud): `sudo uv run python local_main.py`. Type `你好` / `点头` / `暖光` / `关灯`. `--sim` prints actions without servos.
 
-Stage 2 (ReSpeaker, Chinese Vosk): `uv add vosk`, then `sudo uv run python local_main.py --download-vosk`, then `sudo uv run python local_main.py --listen`. Speak **你好**、**点头**、**关灯**、**音乐**. Mapping without a mic: `--say 请关灯`. `--show-stage` starts with `2`.
+Stage 2 (ReSpeaker, Chinese Vosk): `uv add vosk`, then `sudo uv run python local_main.py --download-vosk`, then `sudo uv run python local_main.py --listen`. Speak **你好**、**点头**、**关灯**、**音乐**. Mapping without a mic: `--say 请关灯`. `--show-stage` starts with `4` on the current file.
 
 Music: startup creates `~/lelamp_runtime/music/`. Drop wav/mp3/ogg there. Say **音乐** / **放音乐** to play a random file; **停止音乐** to stop. An empty folder falls back to short builtin beats in `music/.builtin/`.
 
-The LiveKit + OpenAI Realtime path is optional later: copy `plugins/lelamp/runtime_main.py` over `~/lelamp_runtime/main.py`, put `OPENAI_API_KEY` in `.env`, then `sudo uv run main.py console`.
+Look-at: say **看我** / **看着我** / **看过来**. This is the trained visual policy from `lelamp_il/`, not `scanning` or `nod`. Copy `tiny_lamp_int8.onnx` and `meta.json` onto the Pi first. Without those files the lamp says the policy is missing and does not play a canned animation.
+
+The LiveKit + OpenAI Realtime path is optional later: copy `plugins/lelamp/runtime_main.py` over `~/lelamp_runtime/main.py`, put `OPENAI_API_KEY` in `.env`, then `sudo uv run main.py console`. Do not replace `local_main.py` with that path for the Chinese/music lamp.
 
 On this machine, load this skill and drive a sim/SSH body with `terminal` plus:
 
@@ -71,6 +79,7 @@ If the tools are missing, the plugin is not enabled. Tell the user to run `herme
 | Intent | Expression | Light |
 |--------|------------|-------|
 | 打招呼 / hello | `wake_up` | `talk` |
+| 看我 / look at me | `watch_person` (ONNX, not a recording) | `listen` |
 | 同意 / yes | `nod` | `talk` |
 | 拒绝 / no | `headshake` | `alert` at low brightness |
 | 好奇 / thinking | `curious` | `listen` |
