@@ -34,6 +34,11 @@ from pathlib import Path
 
 from PIL import Image
 
+# Official runtime lives next to this repo on the lamp; Leader import needs it on sys.path.
+_RUNTIME = Path.home() / "lelamp_runtime"
+if _RUNTIME.is_dir() and str(_RUNTIME) not in sys.path:
+    sys.path.insert(0, str(_RUNTIME))
+
 JOINT_NAMES = (
     "base_yaw",
     "base_pitch",
