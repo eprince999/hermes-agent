@@ -1,5 +1,6 @@
 # Laptop training (Python 3.10+).
-# 录制示教还需要摄像头（笔记本 USB 摄像头或树莓派 picamera2）
+# 灯上录制只要 pillow，见 requirements-record.txt。不要在树莓派上装本文件。
+# 录制还需要摄像头（笔记本 USB 摄像头或树莓派 picamera2）
 # opencv-python-headless>=4.8,<5
 
 numpy>=1.26,<3

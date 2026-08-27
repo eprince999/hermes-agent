@@ -1,0 +1,3 @@
+# Raspberry Pi / 灯上录制专用。不要在灯上安装 requirements-train.txt
+# （那份会拉 400MB+ 的 PyTorch，SD 卡会爆。）
+pillow>=10,<12

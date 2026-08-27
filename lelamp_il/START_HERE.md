@@ -34,20 +34,25 @@ sudo fuser /dev/ttyACM0 /dev/ttyUSB0 2>/dev/null || true
 
 ---
 
-## 第 2 件事：在 Cursor 桌面打开训练脚本
+## 第 2 件事：在灯上录制（不要装 PyTorch）
 
-笔记本 Cursor 打开 `lelamp_il`（或整个 `~/lelamp`）：
+灯上**禁止** `pip install -r requirements-train.txt`。那会下载 400MB+ 的 torch，SD 卡会满。
+
+用灯上**已经能做动作的** `lelamp_runtime` 虚拟环境，只补 pillow：
 
 ```bash
-cd ~/lelamp/lelamp_il
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-train.txt
+# 先清掉误装的环境（若刚把盘装爆）
+rm -rf ~/hermes-agent/lelamp_il/.venv
+rm -rf ~/.cache/pip
+
+# 换成官方 runtime 的环境（路径按你机器上实际位置改）
+source ~/lelamp_runtime/.venv/bin/activate   # 或 venv/
+pip install -r ~/hermes-agent/lelamp_il/requirements-record.txt
+
+cd ~/hermes-agent/lelamp_il
+python record_demo.py --task look_at_person --port /dev/ttyACM0 --id lelamp \
+    --episodes 2 --seconds 6
 ```
-
-串口若在树莓派上、训练在笔记本上：USB 把灯的舵机板接到**笔记本**，或 SSH 到树莓派上跑 `record_demo.py`（摄像头必须是灯头那颗）。
-
-推荐：在**灯自己的树莓派**上录（摄像头和舵机都在灯上），拷数据回笔记本训练。
 
 ---
 
