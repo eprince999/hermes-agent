@@ -225,46 +225,64 @@ class PiOrWebcam(CameraSource):
             from picamera2 import Picamera2
 
             cam = Picamera2()
-            config = cam.create_preview_configuration(
-                main={"size": (self.width, self.height), "format": "RGB888"}
-            )
-            cam.configure(config)
-            cam.start()
-            time.sleep(0.4)
-            self._kind, self._handle = "picamera2", cam
-            return f"Pi Camera {self.width}x{self.height}"
+            configs = [
+                cam.create_preview_configuration(
+                    main={"size": (self.width, self.height)}
+                ),
+                cam.create_preview_configuration(
+                    main={"size": (640, 480), "format": "XBGR8888"}
+                ),
+                cam.create_still_configuration(
+                    main={"size": (self.width, self.height)}
+                ),
+            ]
+            last_exc: Exception | None = None
+            for config in configs:
+                try:
+                    cam.configure(config)
+                    cam.start()
+                    time.sleep(0.6)
+                    _ = cam.capture_array()
+                    self._kind, self._handle = "picamera2", cam
+                    return f"Pi Camera {self.width}x{self.height} (picamera2)"
+                except Exception as exc:
+                    last_exc = exc
+                    try:
+                        cam.stop()
+                    except Exception:
+                        pass
+            errors.append(f"picamera2: {last_exc}")
         except Exception as exc:
             errors.append(f"picamera2: {exc}")
 
         try:
             import cv2
 
-            candidates = [self.index, 0, 1, 2]
-            seen: set[int] = set()
-            for idx in candidates:
-                if idx in seen:
-                    continue
-                seen.add(idx)
-                cap = cv2.VideoCapture(idx)
-                if not cap.isOpened():
-                    cap.release()
-                    continue
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-                ok, _ = cap.read()
-                if not ok:
-                    cap.release()
-                    continue
-                self._kind, self._handle = "cv2", cap
-                return f"OpenCV 摄像头 {idx}"
-            errors.append("opencv: /dev/video0-2 都打不开（CSI 灯头相机通常不能这样开）")
+            # CSI cameras are not /dev/video0 on a Pi. Only try OpenCV if those nodes exist.
+            nodes = [p for p in (Path("/dev/video0"), Path("/dev/video1")) if p.exists()]
+            if not nodes:
+                errors.append("opencv: 没有 /dev/video0（灯头 CSI 请用 picamera2，不要走 OpenCV）")
+            else:
+                for path in nodes:
+                    cap = cv2.VideoCapture(str(path))
+                    if not cap.isOpened():
+                        cap.release()
+                        continue
+                    ok, _ = cap.read()
+                    if not ok:
+                        cap.release()
+                        continue
+                    self._kind, self._handle = "cv2", cap
+                    return f"OpenCV {path}"
+                errors.append("opencv: video0/1 打开了但读不到帧")
         except Exception as exc:
             errors.append(f"opencv: {exc}")
 
         hint = (
-            "灯头是 CSI 相机，需要系统包 picamera2，并且 venv 要能看到它：\n"
+            "Camera Module 3 要用系统 picamera2：\n"
             "  sudo apt install -y python3-picamera2\n"
-            "  然后把 .venv/pyvenv.cfg 里 include-system-site-packages 改成 true"
+            "  编辑 ~/lelamp_runtime/.venv/pyvenv.cfg\n"
+            "  把 include-system-site-packages 改成 true"
         )
         raise RuntimeError("没有摄像头可用。\n  - " + "\n  - ".join(errors) + "\n" + hint)
 
