@@ -392,8 +392,8 @@ def circadian_mood(hour: Optional[int] = None) -> Tuple[str, int]:
     return "night", 35
 
 
-WAKE_BRIGHTNESS = 100
-WAKE_FADE_SECONDS = 1.8
+WAKE_BRIGHTNESS = 80
+WAKE_FADE_SECONDS = 1.5
 WAKE_PLAY_FALLBACK_SECONDS = 3.5
 
 
@@ -419,6 +419,11 @@ def recording_duration_seconds(name: str, *, fps: float = 30.0) -> float:
         except OSError:
             continue
     return WAKE_PLAY_FALLBACK_SECONDS
+
+
+def wake_blackout_seconds(play_seconds: float, fade_seconds: float = WAKE_FADE_SECONDS) -> float:
+    """Hold the lamp black until the last `fade_seconds` of the wake motion."""
+    return max(0.0, float(play_seconds) - max(0.0, float(fade_seconds)))
 
 
 def resolve_expression(name: str) -> str:
@@ -2277,35 +2282,6 @@ class LocalLamp:
             return "好，不看了。"
         return ""
 
-    def _wait_after_play(self, recording: str) -> None:
-        """Block until the canned motion finishes (or its CSV duration elapses)."""
-        if self.sim or self.motors is None:
-            return
-        duration = recording_duration_seconds(recording)
-        svc = self.motors
-        flag = None
-        for attr in ("is_playing", "playing", "busy"):
-            val = getattr(svc, attr, None)
-            if callable(val) or isinstance(val, bool):
-                flag = attr
-                break
-        if flag is None:
-            time.sleep(duration)
-            return
-        deadline = time.monotonic() + duration + 1.0
-        started = False
-        while time.monotonic() < deadline:
-            val = getattr(svc, flag)
-            try:
-                busy = bool(val()) if callable(val) else bool(val)
-            except Exception:
-                busy = False
-            if busy:
-                started = True
-            elif started:
-                return
-            time.sleep(0.05)
-
     def fade_brightness(self, target: int, *, seconds: float = WAKE_FADE_SECONDS) -> None:
         """Ramp LED brightness to target while keeping the current color."""
         start = int(self.brightness)
@@ -2328,14 +2304,15 @@ class LocalLamp:
             time.sleep(dt)
 
     def wake(self) -> None:
-        mood, bri = circadian_mood()
-        self.brightness = bri
+        mood, _circadian = circadian_mood()
+        self.brightness = 0
         self._apply_rgb(MOOD_RGB[mood])
         self._play("wake_up")
-        self._wait_after_play("wake_up")
+        if not self.sim:
+            time.sleep(wake_blackout_seconds(recording_duration_seconds("wake_up")))
         self.fade_brightness(WAKE_BRIGHTNESS)
         print(
-            f"台灯醒了。现在 {mood} 光，已经最亮。"
+            f"台灯醒了。现在 {mood} 光，亮度 {self.brightness}%。"
             "等你说话：你好、点头、看我、关灯、音乐。"
         )
 

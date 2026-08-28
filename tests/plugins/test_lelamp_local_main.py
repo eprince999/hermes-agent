@@ -233,7 +233,9 @@ def test_sim_express_then_off_updates_state():
     assert lamp.brightness == 85
 
 
-def test_sim_wake_fades_to_full_brightness_after_motion():
+def test_sim_wake_fades_from_black_to_80_at_motion_tail():
+    from plugins.lelamp.local_main import WAKE_BRIGHTNESS, _scale_rgb
+
     lamp = LocalLamp(
         sim=True,
         port="/dev/null",
@@ -243,12 +245,15 @@ def test_sim_wake_fades_to_full_brightness_after_motion():
     )
     lamp.wake()
     assert lamp.last_expression == "wake_up"
-    assert lamp.brightness == 100
-    assert lamp.last_rgb == (
-        lamp.base_rgb[0],
-        lamp.base_rgb[1],
-        lamp.base_rgb[2],
-    )
+    assert lamp.brightness == WAKE_BRIGHTNESS == 80
+    assert lamp.last_rgb == _scale_rgb(lamp.base_rgb, 80)
+
+
+def test_wake_blackout_covers_all_but_the_tail():
+    from plugins.lelamp.local_main import wake_blackout_seconds
+
+    assert wake_blackout_seconds(3.5, 1.5) == 2.0
+    assert wake_blackout_seconds(1.0, 1.5) == 0.0
 
 
 def test_recording_duration_reads_csv(tmp_path, monkeypatch):
