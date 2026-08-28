@@ -25,12 +25,15 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import math
+import select
 import shutil
 import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 from PIL import Image
@@ -46,7 +49,10 @@ from feetech_bus import (
     uv_run_hint,
 )
 
-RECORD_DEMO_REVISION = "2026-08-28-cam"
+# Bump when camera/servo recording logic changes. Printed as the first
+# line of main(). If the lamp does not print this, git pull did not land
+# — do not copy this file into ~/lelamp_runtime/.
+RECORD_DEMO_REVISION = "2026-08-28-rpicam"
 
 add_runtime_site_packages()
 
@@ -163,9 +169,11 @@ class LeLampJoints(JointSource):
             bus.connect()
             bus.disable_torque()
             self._bus = bus
+            present = bus.sync_read("Present_Position")
+            short = {name: float(present[name]) for name in self._names}
             return (
                 f"Feetech {self.port}  力矩已关闭，可用手摆  "
-                f"(LeLampLeader 不可用)"
+                f"当前={_fmt_joints(short)}"
             )
         except Exception as bus_exc:
             errors.append(f"lerobot Feetech: {bus_exc}")
@@ -273,6 +281,45 @@ def _camera_holders() -> str:
     return (result.stdout or result.stderr or "").strip()
 
 
+def _release_camera_apps() -> None:
+    """Stop leftover rpicam-* tools so the CSI pipeline is free.
+
+    Does not kill python — that would stop this recorder.
+    """
+    for name in (
+        "rpicam-hello",
+        "rpicam-still",
+        "rpicam-vid",
+        "libcamera-hello",
+        "libcamera-still",
+        "libcamera-vid",
+    ):
+        try:
+            subprocess.run(["pkill", "-x", name], capture_output=True, timeout=3)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+
+
+def take_jpeg_from_buffer(buf: bytearray) -> bytes | None:
+    """Pop one JPEG from an MJPEG byte buffer. Incomplete frames stay in buf."""
+    soi, eoi = b"\xff\xd8", b"\xff\xd9"
+    start = buf.find(soi)
+    if start < 0:
+        if len(buf) > 1_000_000:
+            del buf[:-1]
+        return None
+    if start:
+        del buf[:start]
+    end = buf.find(eoi, 2)
+    if end < 0:
+        if len(buf) > 2_000_000:
+            raise RuntimeError("MJPEG 帧过大，相机输出异常")
+        return None
+    jpeg = bytes(buf[: end + 2])
+    del buf[: end + 2]
+    return jpeg
+
+
 def _picamera_capture(cam, timeout_s: float = 8.0):
     try:
         return cam.capture_array("main", wait=timeout_s)
@@ -303,6 +350,46 @@ def _fmt_joints(values: dict[str, float]) -> str:
     return " ".join(parts)
 
 
+def _rpicam_commands(width: int, height: int) -> list[list[str]]:
+    bins = []
+    for name in ("rpicam-vid", "libcamera-vid"):
+        if shutil.which(name):
+            bins.append(name)
+    cmds: list[list[str]] = []
+    for binary in bins:
+        sized = [
+            binary,
+            "-t",
+            "0",
+            "--codec",
+            "mjpeg",
+            "--width",
+            str(width),
+            "--height",
+            str(height),
+            "--framerate",
+            "30",
+            "--nopreview",
+            "-o",
+            "-",
+        ]
+        cmds.append(sized + ["--flush"])
+        cmds.append(list(sized))
+        cmds.append(
+            [
+                binary,
+                "-t",
+                "0",
+                "--codec",
+                "mjpeg",
+                "--nopreview",
+                "-o",
+                "-",
+            ]
+        )
+    return cmds
+
+
 class PiOrWebcam(CameraSource):
     def __init__(self, index: int, width: int, height: int) -> None:
         self.index = index
@@ -310,73 +397,42 @@ class PiOrWebcam(CameraSource):
         self.height = height
         self._kind = None
         self._handle = None
+        self._mjpeg_buf = bytearray()
+        self._stderr: deque[str] = deque(maxlen=40)
 
     def connect(self) -> str:
         errors: list[str] = []
+        print("    正在打开灯头摄像头（马上会有进度；完全没字就是旧脚本）...", flush=True)
         holders = _camera_holders()
         if holders:
             print(f"    警告: 摄像头可能被占用:\n{holders}", flush=True)
             print("    先停 rpicam-hello / 语音 agent / 另一个 python，再录。", flush=True)
-
-        try:
-            from picamera2 import Picamera2
-
-            print("    picamera2: 正在初始化 CSI（Module 3 第一次可能要几秒）...", flush=True)
-            stuck = threading.Event()
-
-            def _nudge() -> None:
-                if not stuck.wait(12):
-                    print(
-                        "    仍在等 libcamera。超过 20 秒请 Ctrl-C，然后: sudo pkill -f rpicam",
-                        flush=True,
-                    )
-
-            threading.Thread(target=_nudge, daemon=True).start()
-            cam = Picamera2()
-            stuck.set()
-            config_tries = [
-                {"size": (640, 480), "format": "XBGR8888"},
-                {"size": (self.width, self.height), "format": "XBGR8888"},
-                {"size": (640, 480)},
-                {"size": (self.width, self.height)},
-            ]
-            last_exc: Exception | None = None
-            for spec in config_tries:
-                print(f"    picamera2: 尝试 {spec} ...", flush=True)
-                try:
-                    kwargs = {"main": spec, "buffer_count": 1}
-                    try:
-                        config = cam.create_preview_configuration(**kwargs)
-                    except TypeError:
-                        config = cam.create_preview_configuration(main=spec)
-                    cam.configure(config)
-                    cam.start()
-                    time.sleep(0.4)
-                    _ = _picamera_capture(cam, timeout_s=8.0)
-                    self._kind, self._handle = "picamera2", cam
-                    w, h = spec.get("size", (self.width, self.height))
-                    return f"Pi Camera {w}x{h} (picamera2)"
-                except Exception as exc:
-                    last_exc = exc
-                    print(f"    picamera2: {spec} 失败: {exc}", flush=True)
-                    _stop_picamera(cam)
-            errors.append(f"picamera2: {last_exc}")
-        except Exception as exc:
-            errors.append(f"picamera2: {exc}")
-            print(f"    picamera2 不可用: {exc}", flush=True)
+        _release_camera_apps()
 
         if _is_raspberry_pi():
+            try:
+                return self._connect_rpicam()
+            except Exception as exc:
+                errors.append(f"rpicam-vid: {exc}")
+                print(f"    rpicam-vid 失败: {exc}", flush=True)
+            try:
+                return self._connect_picamera2()
+            except Exception as exc:
+                errors.append(str(exc))
             hint = (
                 "树莓派灯头 CSI 不要走 OpenCV（/dev/video0 会一直卡住）。\n"
-                "  sudo pkill -f rpicam || true\n"
-                "  bash ~/hermes-agent/lelamp_il/enable_pi_camera.sh\n"
-                "  然后: cd ~/lelamp_runtime && sudo uv run python "
-                "~/hermes-agent/lelamp_il/record_demo.py --task look_at_person "
-                "--port /dev/ttyACM0 --id lelamp --episodes 2 --seconds 6"
+                "  sudo pkill -x rpicam-hello; sudo pkill -x rpicam-vid || true\n"
+                "  确认 `rpicam-hello --list-cameras` 仍能列出 IMX708。\n"
+                "  然后: bash ~/hermes-agent/lelamp_il/record_on_lamp.sh"
             )
             raise RuntimeError(
                 "没有摄像头可用。\n  - " + "\n  - ".join(errors) + "\n" + hint
             )
+
+        try:
+            return self._connect_picamera2()
+        except Exception as exc:
+            errors.append(str(exc))
 
         try:
             import cv2
@@ -402,7 +458,150 @@ class PiOrWebcam(CameraSource):
 
         raise RuntimeError("没有摄像头可用。\n  - " + "\n  - ".join(errors))
 
+    def _connect_rpicam(self) -> str:
+        width = 640 if self.width <= 640 else self.width
+        height = 480 if self.height <= 480 else self.height
+        cmds = _rpicam_commands(width, height)
+        if not cmds:
+            raise RuntimeError("找不到 rpicam-vid / libcamera-vid")
+        last_err = "no command tried"
+        for cmd in cmds:
+            print(f"    rpicam-vid: 尝试 {' '.join(cmd)}", flush=True)
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    bufsize=0,
+                )
+            except FileNotFoundError as exc:
+                last_err = str(exc)
+                continue
+            self._handle = proc
+            self._mjpeg_buf = bytearray()
+            self._stderr.clear()
+            threading.Thread(
+                target=self._drain_rpicam_stderr,
+                args=(proc,),
+                daemon=True,
+            ).start()
+            try:
+                _ = self._read_jpeg(timeout_s=10.0, progress=True)
+            except Exception as exc:
+                last_err = str(exc)
+                err_tail = " | ".join(list(self._stderr)[-6:])
+                if err_tail:
+                    last_err = f"{last_err}; stderr: {err_tail}"
+                print(f"    rpicam-vid: 失败: {last_err}", flush=True)
+                self._stop_rpicam()
+                continue
+            self._kind = "rpicam-vid"
+            return f"Pi Camera via {cmd[0]} (MJPEG {width}x{height})"
+        raise RuntimeError(last_err)
+
+    def _drain_rpicam_stderr(self, proc: subprocess.Popen) -> None:
+        if proc.stderr is None:
+            return
+        try:
+            for raw in iter(proc.stderr.readline, b""):
+                line = raw.decode("utf-8", "replace").rstrip()
+                if line:
+                    self._stderr.append(line)
+        except Exception:
+            return
+
+    def _read_jpeg(self, timeout_s: float, progress: bool = False) -> bytes:
+        proc = self._handle
+        if proc is None or proc.stdout is None:
+            raise RuntimeError("rpicam-vid 没有 stdout")
+        deadline = time.monotonic() + timeout_s
+        last_nudge = 0.0
+        while time.monotonic() < deadline:
+            if progress:
+                waited = timeout_s - (deadline - time.monotonic())
+                if waited - last_nudge >= 2.0:
+                    last_nudge = waited
+                    print(f"    rpicam-vid: 等待第一帧 {waited:.0f}s ...", flush=True)
+            if proc.poll() is not None:
+                err_tail = " | ".join(list(self._stderr)[-8:]) or "no stderr"
+                raise RuntimeError(
+                    f"rpicam-vid 退出码 {proc.returncode}: {err_tail}"
+                )
+            ready, _, _ = select.select([proc.stdout], [], [], 0.25)
+            if not ready:
+                continue
+            chunk = proc.stdout.read(4096)
+            if not chunk:
+                continue
+            self._mjpeg_buf.extend(chunk)
+            jpeg = take_jpeg_from_buffer(self._mjpeg_buf)
+            if jpeg:
+                return jpeg
+        raise TimeoutError(f"{timeout_s:.0f}s 内没有收到 JPEG 帧")
+
+    def _stop_rpicam(self) -> None:
+        proc = self._handle
+        self._handle = None
+        if proc is None:
+            return
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def _connect_picamera2(self) -> str:
+        print("    picamera2: 准备 import（这一步卡住请 Ctrl-C，改用 rpicam-vid）...", flush=True)
+        from picamera2 import Picamera2
+
+        print("    picamera2: 正在初始化 CSI（Module 3 第一次可能要几秒）...", flush=True)
+        stuck = threading.Event()
+
+        def _nudge() -> None:
+            if not stuck.wait(8):
+                print(
+                    "    仍在等 Picamera2()。12 秒后会放弃，改试下一种方式。",
+                    flush=True,
+                )
+
+        threading.Thread(target=_nudge, daemon=True).start()
+        cam = Picamera2()
+        stuck.set()
+        config_tries = [
+            {"size": (640, 480), "format": "XBGR8888"},
+            {"size": (self.width, self.height), "format": "XBGR8888"},
+            {"size": (640, 480)},
+            {"size": (self.width, self.height)},
+        ]
+        last_exc: Exception | None = None
+        for spec in config_tries:
+            print(f"    picamera2: 尝试 {spec} ...", flush=True)
+            try:
+                kwargs = {"main": spec, "buffer_count": 1}
+                try:
+                    config = cam.create_preview_configuration(**kwargs)
+                except TypeError:
+                    config = cam.create_preview_configuration(main=spec)
+                cam.configure(config)
+                cam.start()
+                time.sleep(0.4)
+                _ = _picamera_capture(cam, timeout_s=8.0)
+                self._kind, self._handle = "picamera2", cam
+                w, h = spec.get("size", (self.width, self.height))
+                return f"Pi Camera {w}x{h} (picamera2)"
+            except Exception as exc:
+                last_exc = exc
+                print(f"    picamera2: {spec} 失败: {exc}", flush=True)
+                _stop_picamera(cam)
+        raise RuntimeError(f"picamera2: {last_exc}")
+
     def grab(self) -> Image.Image:
+        if self._kind == "rpicam-vid":
+            jpeg = self._read_jpeg(timeout_s=2.0)
+            return Image.open(io.BytesIO(jpeg)).convert("RGB")
         if self._kind == "picamera2":
             arr = _picamera_capture(self._handle, timeout_s=2.0)
             return Image.fromarray(arr).convert("RGB")
@@ -417,6 +616,8 @@ class PiOrWebcam(CameraSource):
             self._handle.release()
         if self._kind == "picamera2" and self._handle is not None:
             _stop_picamera(self._handle)
+        if self._kind == "rpicam-vid":
+            self._stop_rpicam()
         self._handle = None
 
 
@@ -540,6 +741,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    print(f"record_demo {RECORD_DEMO_REVISION}", flush=True)
+    print(f"file {Path(__file__).resolve()}", flush=True)
     args = parse_args(argv)
     task_dir = (args.out / args.task).resolve()
     task_dir.mkdir(parents=True, exist_ok=True)
@@ -570,24 +773,27 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         warn_stop_voice_agent(port)
 
-    print("步骤 1/4  连接舵机并关闭力矩（这样你才能用手掰）")
-    if args.dummy:
-        joint_src: JointSource = DummyJoints()
-    else:
-        joint_src = LeLampJoints(port, args.id)
-    print("   ", joint_src.connect())
-
-    print("步骤 2/4  打开灯头摄像头（模型要看灯自己看见的画面）")
-    if args.dummy:
-        cam_src: CameraSource = DummyCamera()
-    else:
-        cam_src = PiOrWebcam(args.camera, args.width, args.height)
-    print("   ", cam_src.connect())
-    print()
-
+    joint_src: JointSource | None = None
+    cam_src: CameraSource | None = None
     start_idx = next_episode_index(task_dir)
     kept = 0
     try:
+        print("步骤 1/4  连接舵机并关闭力矩（这样你才能用手掰）")
+        if args.dummy:
+            joint_src = DummyJoints()
+        else:
+            joint_src = LeLampJoints(port, args.id)
+        print("   ", joint_src.connect())
+
+        print("步骤 2/4  打开灯头摄像头（模型要看灯自己看见的画面）")
+        if args.dummy:
+            cam_src = DummyCamera()
+        else:
+            cam_src = PiOrWebcam(args.camera, args.width, args.height)
+        print("   ", cam_src.connect())
+        print()
+        if joint_src is None or cam_src is None:
+            raise RuntimeError("internal: sources not created")
         while kept < args.episodes:
             ep_idx = start_idx + kept
             ep_name = f"ep_{ep_idx:03d}"
@@ -636,8 +842,10 @@ def main(argv: list[str] | None = None) -> int:
                 shutil.rmtree(ep_dir)
                 print("   已删除，重新来这一段。")
     finally:
-        joint_src.close()
-        cam_src.close()
+        if joint_src is not None:
+            joint_src.close()
+        if cam_src is not None:
+            cam_src.close()
 
     print()
     print("=" * 60)

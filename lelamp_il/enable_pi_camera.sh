@@ -47,5 +47,4 @@ echo "  source ~/lelamp_runtime/.venv/bin/activate   # 路径按你机器改"
 echo "  python3 -c \"from picamera2 import Picamera2; print('venv picamera2 ok')\""
 echo
 echo "然后再录（只用官方环境，不要另开 venv）："
-echo "  cd ~/lelamp_runtime"
-echo "  sudo uv run python ~/hermes-agent/lelamp_il/record_demo.py --task look_at_person --port /dev/ttyACM0 --id lelamp --episodes 2 --seconds 6"
+echo "  bash ~/hermes-agent/lelamp_il/record_on_lamp.sh"

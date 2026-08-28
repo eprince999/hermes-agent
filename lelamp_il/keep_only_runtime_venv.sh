@@ -71,7 +71,7 @@ done < <(find "$HOME" -name pyvenv.cfg -not -path "$KEEP_ROOT/*" 2>/dev/null)
 if [ "${#TO_DELETE[@]}" -eq 0 ]; then
   echo "没有多余虚拟环境。"
   echo "录制只用："
-  echo "  cd ~/lelamp_runtime && sudo uv run python ~/hermes-agent/lelamp_il/record_demo.py --task look_at_person --port /dev/ttyACM0 --id lelamp --episodes 2 --seconds 6"
+  echo "  bash ~/hermes-agent/lelamp_il/record_on_lamp.sh"
   exit 0
 fi
 
@@ -90,5 +90,4 @@ echo
 echo "还在的环境："
 echo "  $KEEP_VENV"
 echo "录制："
-echo "  cd ~/lelamp_runtime"
-echo "  sudo uv run python ~/hermes-agent/lelamp_il/record_demo.py --task look_at_person --port /dev/ttyACM0 --id lelamp --episodes 2 --seconds 6"
+echo "  bash ~/hermes-agent/lelamp_il/record_on_lamp.sh"

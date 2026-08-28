@@ -48,60 +48,67 @@ git pull
 bash lelamp_il/keep_only_runtime_venv.sh
 ```
 
-录制永远从 runtime 启动，不要 `source` 别的 venv：
+录制永远走仓库里这份脚本，不要把 `record_demo.py` 复制进 `~/lelamp_runtime/`：
 
 ```bash
-cd ~/lelamp_runtime
-sudo uv run python ~/hermes-agent/lelamp_il/record_demo.py --task look_at_person \
-    --port /dev/ttyACM0 --id lelamp --episodes 2 --seconds 6
+bash ~/hermes-agent/lelamp_il/record_on_lamp.sh
 ```
 
-**Camera Module 3 必须用系统 `picamera2`，不能 `pip install picamera2`。**  
-若 `(lelamp-runtime)` 里 `import picamera2` 失败，跑一次（只改官方这个 venv）：
+灯头 Camera Module 3 现在**优先 `rpicam-vid`**（和 `rpicam-hello --list-cameras` 同一套系统相机）。`picamera2` 只是后备。不要 `pip install picamera2`。若以后仍要给 venv 看见系统 picamera2：
 
 ```bash
 cd ~/hermes-agent/lelamp_il
 bash enable_pi_camera.sh
 ```
 
-启动时必须看到 `revision 2026-08-28-cam`。没有这一行就还是旧文件：
+启动时**第一行**必须是 `record_demo 2026-08-28-rpicam`。没有这一行就还是旧文件（旧文件步骤 2 会无输出卡住）：
 
 ```bash
+# 先 Ctrl-C 掉卡住的旧进程
+sudo pkill -x rpicam-hello; sudo pkill -x rpicam-vid || true
+
 cd ~/hermes-agent
 git fetch origin cursor/lelamp-zero2w-train-36b0
 git checkout cursor/lelamp-zero2w-train-36b0
 git pull origin cursor/lelamp-zero2w-train-36b0
+git reset --hard origin/cursor/lelamp-zero2w-train-36b0
+
+grep RECORD_DEMO_REVISION lelamp_il/record_demo.py
+# 必须看到 2026-08-28-rpicam
+
+# 不要复制脚本，不要 cd 到 ~/lelamp_runtime 后跑 python record_demo.py
+bash ~/hermes-agent/lelamp_il/record_on_lamp.sh
 ```
+
+步骤 2 必须立刻打印 `rpicam-vid: 尝试 ...`。若仍然完全没字，跑的不是这份文件。
 
 ---
 
 ## 第 3 件事：用手教它「看我」（先 2 段试通，再 50 段）
 
 ```bash
-# 树莓派上，语音已停，且上一步 venv 已能 import picamera2
-cd ~/lelamp_runtime
-sudo uv run python ~/hermes-agent/lelamp_il/record_demo.py --task look_at_person \
-    --port /dev/ttyACM0 --id lelamp --episodes 2 --seconds 6
+# 树莓派上，语音已停。用包装脚本，它会拒绝旧文件。
+bash ~/hermes-agent/lelamp_il/record_on_lamp.sh
 ```
 
-脚本会关掉力矩。每一段：你站到一个位置 → Enter → 倒计时结束 → **用手把灯头转到看着你的脸**，保持 6 秒。
+看到 `Pi Camera via rpicam-vid` 之后：你站到一个位置 → Enter → 倒计时结束 → **用手把灯头转到看着你的脸**，保持 6 秒。
 
-2 段没报错后，再录到大约 50 段，换左/中/右、近/远。
+2 段没报错后，再录到大约 50 段，换左/中/右、近/远：
 
 ```bash
-cd ~/lelamp_runtime
-sudo uv run python ~/hermes-agent/lelamp_il/record_demo.py --task look_at_person \
-    --port /dev/ttyACM0 --id lelamp --episodes 50 --seconds 6
+bash ~/hermes-agent/lelamp_il/record_on_lamp.sh --episodes 50
 ```
+
+数据默认写在 `~/lelamp_runtime/data/look_at_person/`（包装脚本会 cd 到 runtime）。
 
 ---
 
 ## 第 4 件事：笔记本训练
 
-把 `data/look_at_person/` 拷回笔记本（若录在 Pi 上）：
+把 `data/look_at_person/` 拷回笔记本（灯上默认在 runtime 下）：
 
 ```bash
-scp -r spocklamp@raspberrypi:~/hermes-agent/lelamp_il/data/look_at_person ./data/
+scp -r spocklamp@raspberrypi:~/lelamp_runtime/data/look_at_person ./data/
 python train.py --data ./data/look_at_person --epochs 40 --export ./artifacts
 ```
 
