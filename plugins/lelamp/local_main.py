@@ -74,6 +74,10 @@ AGENT_STAGE = 4
 AGENT_LABEL = "vosk listen + music folder + look-at"
 # If the lamp prints「已看向画面中的人（6.0 秒）」it is still the old runtime copy.
 WATCH_REVISION = "2026-08-28-follow"
+# Printed at boot. If journal has no 2026-08-28-boot, the Pi is still on the old unit.
+BOOT_REVISION = "2026-08-28-boot"
+# USB CDC ACM often appears several seconds after systemd starts user services.
+SERIAL_WAIT_SECONDS = 45.0
 
 
 def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = None) -> Path:
@@ -109,6 +113,31 @@ def _runtime_python(runtime_dir: Path) -> Tuple[str, List[str]]:
     return sys.executable, [sys.executable]
 
 
+def wait_for_serial_port(port: str, *, timeout: float = SERIAL_WAIT_SECONDS) -> bool:
+    """Block until the Feetech USB serial node exists.
+
+    On a Pi Zero 2W cold boot, ``/dev/ttyACM0`` can show up tens of seconds
+    after ``local-fs.target``. Returning False means "start anyway" — RGB
+    still works, motors retry inside ``LocalLamp.start``.
+    """
+    path = Path(port)
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    announced = False
+    while True:
+        if path.exists():
+            if announced:
+                print(f"舵机口到了 {port}", flush=True)
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print(f"等了 {timeout:.0f}s 还没有 {port}，先继续", flush=True)
+            return False
+        if not announced:
+            print(f"等待舵机口 {port}（最多 {timeout:.0f}s）…", flush=True)
+            announced = True
+        time.sleep(min(0.5, remaining))
+
+
 def boot_service_unit(
     *,
     runtime_dir: Path,
@@ -116,13 +145,24 @@ def boot_service_unit(
     home: Path,
     user: str,
     il_dir: Path,
+    port: str = "/dev/ttyACM0",
 ) -> str:
     _exe, prefix = _runtime_python(runtime_dir)
     args = " ".join(prefix + [str(script), "--listen"])
+    serial = (port or "/dev/ttyACM0").strip() or "/dev/ttyACM0"
+    # Wait for ACM but always continue — a missing node must not fail the unit.
+    wait_acm = (
+        "/bin/bash -c 'for i in $(seq 1 45); do "
+        f"[ -e {serial} ] && exit 0; sleep 1; done; exit 0'"
+    )
+    path_env = (
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:"
+        f"{home}/.local/bin:{runtime_dir}/.venv/bin"
+    )
     return f"""[Unit]
-Description=LeLamp local agent (wake + wait for Chinese commands)
-After=local-fs.target sound.target
-Wants=sound.target
+Description=LeLamp local agent (wake + listen, {BOOT_REVISION})
+After=local-fs.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -133,10 +173,12 @@ Environment=SUDO_USER={user}
 Environment=LELAMP_IL_DIR={il_dir}
 Environment=LELAMP_LISTEN=1
 Environment=PYTHONUNBUFFERED=1
-ExecStartPre=/bin/sleep 2
+Environment=PATH={path_env}
+TimeoutStartSec=90
+ExecStartPre={wait_acm}
 ExecStart={args}
 Restart=always
-RestartSec=4
+RestartSec=5
 StandardInput=null
 StandardOutput=journal
 StandardError=journal
@@ -168,12 +210,14 @@ def install_boot_service(
             snap.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, snap / "stage4.py")
     il = Path(os.environ.get("LELAMP_IL_DIR") or (home / "hermes-agent" / "lelamp_il"))
+    port = (os.environ.get("LELAMP_PORT") or "/dev/ttyACM0").strip() or "/dev/ttyACM0"
     text = boot_service_unit(
         runtime_dir=runtime,
         script=script if script.is_file() else src,
         home=home,
         user=user,
         il_dir=il,
+        port=port,
     )
     dest = Path(unit_path or "/etc/systemd/system/lelamp-local.service")
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -206,7 +250,7 @@ def install_boot_service(
     _run([systemctl, "daemon-reload"])
     _run([systemctl, "enable", BOOT_SERVICE_NAME])
     _run([systemctl, "restart", BOOT_SERVICE_NAME])
-    print(f"已开机自启 {BOOT_SERVICE_NAME}。上电会醒来并等你说话。")
+    print(f"已开机自启 {BOOT_SERVICE_NAME}（{BOOT_REVISION}）。上电会闪一下再醒来。")
     print(f"日志: journalctl -u {BOOT_SERVICE_NAME} -f")
     return dest
 
@@ -1898,14 +1942,20 @@ class LocalLamp:
 
     def start(self) -> None:
         folder = ensure_music_dir()
-        print(f"music 文件夹 {folder}")
+        print(f"music 文件夹 {folder}", flush=True)
+        print(f"boot {BOOT_REVISION}", flush=True)
         if self.sim:
-            print("[sim] skip motors/rgb connect")
+            print("[sim] skip motors/rgb connect", flush=True)
             return
-        from lelamp.service.motors.motors_service import MotorsService
+        self._try_start_rgb()
+        self._alive_flash()
+        self._try_start_motors()
+        if self.rgb is None and self.motors is None:
+            raise RuntimeError(f"RGB 和舵机都没起来（口 {self.port}）")
+
+    def _try_start_rgb(self) -> None:
         from lelamp.service.rgb.rgb_service import RGBService
 
-        self.motors = MotorsService(port=self.port, lamp_id=self.lamp_id, fps=30)
         self.rgb = RGBService(
             led_count=self.led_count,
             led_pin=12,
@@ -1915,9 +1965,64 @@ class LocalLamp:
             led_invert=False,
             led_channel=0,
         )
-        self.motors.start()
-        self.rgb.start()
-        print(f"motors on {self.port}  rgb leds={self.led_count}")
+        last_exc: Optional[BaseException] = None
+        for attempt in range(1, 6):
+            try:
+                self.rgb.start()
+                print(f"rgb leds={self.led_count}", flush=True)
+                return
+            except Exception as exc:
+                last_exc = exc
+                print(f"RGB 第 {attempt} 次没起来: {exc}", flush=True)
+                time.sleep(1.0)
+        print(f"RGB 暂时不可用: {last_exc}", flush=True)
+        self.rgb = None
+
+    def _alive_flash(self) -> None:
+        """Brief glow so a cold boot is visibly alive before the wake blackout."""
+        if self.sim or self.rgb is None:
+            return
+        try:
+            mood, _circadian = circadian_mood()
+            saved = int(self.brightness)
+            self.brightness = 55
+            self._apply_rgb(MOOD_RGB[mood])
+            time.sleep(0.45)
+            self.brightness = 0
+            self._apply_rgb(MOOD_RGB[mood])
+            self.brightness = saved
+        except Exception as exc:
+            print(f"开机闪灯失败: {exc}", flush=True)
+
+    def _try_start_motors(self) -> None:
+        from lelamp.service.motors.motors_service import MotorsService
+
+        wait_for_serial_port(self.port)
+        deadline = time.monotonic() + SERIAL_WAIT_SECONDS
+        attempt = 0
+        last_exc: Optional[BaseException] = None
+        while True:
+            attempt += 1
+            svc = None
+            try:
+                svc = MotorsService(port=self.port, lamp_id=self.lamp_id, fps=30)
+                svc.start()
+            except Exception as exc:
+                last_exc = exc
+                print(f"舵机第 {attempt} 次没起来: {exc}", flush=True)
+                if svc is not None:
+                    self.motors = svc
+                    self._release_motors()
+                else:
+                    self.motors = None
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(1.5)
+                continue
+            self.motors = svc
+            print(f"motors on {self.port}", flush=True)
+            return
+        print(f"舵机暂时不可用，先亮灯听令: {last_exc}", flush=True)
 
     def stop(self) -> None:
         self.stop_watch_person()
@@ -1937,7 +2042,8 @@ class LocalLamp:
     def _play(self, recording: str, *, wait: bool = True) -> None:
         self.last_expression = recording
         if self.sim or self.motors is None:
-            print(f"[sim] play {recording}")
+            why = "sim" if self.sim else "no motors"
+            print(f"[{why}] play {recording}", flush=True)
             return
         self.motors.dispatch("play", recording)
 
@@ -2320,12 +2426,14 @@ class LocalLamp:
         self.brightness = 0
         self._apply_rgb(MOOD_RGB[mood])
         self._play("wake_up")
-        if not self.sim:
+        # No motors → no wake_up motion; fade immediately so reboot still looks alive.
+        if not self.sim and self.motors is not None:
             time.sleep(wake_blackout_seconds(recording_duration_seconds("wake_up")))
         self.fade_brightness(WAKE_BRIGHTNESS)
         print(
             f"台灯醒了。现在 {mood} 光，亮度 {self.brightness}%。"
-            "等你说话：你好、点头、看我、关灯、音乐。"
+            "等你说话：你好、点头、看我、关灯、音乐。",
+            flush=True,
         )
 
 
@@ -2384,6 +2492,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         install_boot_service()
         return 0
     print(f"local_main  stage {AGENT_STAGE}  ({AGENT_LABEL})")
+    print(f"boot {BOOT_REVISION}", flush=True)
     print(
         f"look-at {WATCH_REVISION}  {Path(__file__).resolve()}  "
         "（看我会一直跟；若结束打印「6.0 秒」=还在跑旧脚本）"
@@ -2405,10 +2514,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         led_count=args.led_count,
         brightness=70,
     )
-    lamp.start()
     try:
+        try:
+            lamp.start()
+        except Exception as exc:
+            print(f"硬件启动失败（仍会听令）: {exc}", flush=True)
         if not args.no_wake:
-            lamp.wake()
+            try:
+                lamp.wake()
+            except Exception as exc:
+                print(f"醒来动作失败（仍会听令）: {exc}", flush=True)
+                try:
+                    lamp.brightness = WAKE_BRIGHTNESS
+                    lamp._apply_rgb(lamp.base_rgb)
+                except Exception:
+                    pass
         for phrase in args.say:
             if apply_speech(lamp, phrase) == "quit":
                 return 0

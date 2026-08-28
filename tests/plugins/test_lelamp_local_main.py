@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from plugins.lelamp.local_main import (
@@ -296,10 +297,51 @@ def test_boot_service_unit_wakes_and_listens(tmp_path):
     assert "--listen" in text
     assert "WantedBy=multi-user.target" in text
     assert "LELAMP_LISTEN=1" in text
-    assert "wake" in text.lower() or "Chinese" in text
+    assert "wake" in text.lower() or "Chinese" in text or "listen" in text.lower()
+    assert "StartLimitIntervalSec=0" in text
+    assert "sound.target" not in text
+    assert "ttyACM0" in text
+    assert local_main.BOOT_REVISION in text
     copied = tmp_path / "runtime" / "local_main.py"
     assert copied.is_file()
     assert 'WATCH_REVISION = "2026-08-28-follow"' in copied.read_text(encoding="utf-8")
+    assert 'BOOT_REVISION = "2026-08-28-boot"' in copied.read_text(encoding="utf-8")
+
+
+def test_wait_for_serial_port_finds_existing_node(tmp_path):
+    from plugins.lelamp.local_main import wait_for_serial_port
+
+    port = tmp_path / "ttyACM0"
+    port.write_text("", encoding="utf-8")
+    assert wait_for_serial_port(str(port), timeout=1.0) is True
+
+
+def test_wait_for_serial_port_times_out(tmp_path):
+    from plugins.lelamp.local_main import wait_for_serial_port
+
+    missing = tmp_path / "missing-acm"
+    t0 = time.monotonic()
+    assert wait_for_serial_port(str(missing), timeout=0.25) is False
+    assert time.monotonic() - t0 < 1.5
+
+
+def test_wake_failure_still_listens(monkeypatch):
+    from plugins.lelamp import local_main
+
+    seen = {}
+
+    def boom(_self):
+        raise RuntimeError("rgb down")
+
+    def fake_listen(lamp, *, device, model_path):
+        seen["listen"] = True
+        return 0
+
+    monkeypatch.setattr(local_main.LocalLamp, "wake", boom)
+    monkeypatch.setattr(local_main, "run_listen_loop", fake_listen)
+    monkeypatch.setenv("LELAMP_LISTEN", "1")
+    assert local_main.main(["--sim"]) == 0
+    assert seen.get("listen") is True
 
 
 def test_lelamp_listen_env_skips_repl(monkeypatch):
