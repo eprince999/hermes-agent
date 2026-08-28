@@ -186,11 +186,23 @@ def install_boot_service(
         print("没有 systemctl，只写了 unit 文件。")
         return dest
 
-    def _run(cmd: List[str]) -> None:
-        subprocess.run(cmd, check=False)
+    def _run(cmd: List[str], *, quiet: bool = False) -> None:
+        subprocess.run(
+            cmd,
+            check=False,
+            capture_output=quiet,
+            text=True,
+        )
 
-    _run([systemctl, "stop", "lelamp.service"])
-    _run([systemctl, "disable", "lelamp.service"])
+    listed = subprocess.run(
+        [systemctl, "list-unit-files", "lelamp.service"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if "lelamp.service" in (listed.stdout or ""):
+        _run([systemctl, "stop", "lelamp.service"], quiet=True)
+        _run([systemctl, "disable", "lelamp.service"], quiet=True)
     _run([systemctl, "daemon-reload"])
     _run([systemctl, "enable", BOOT_SERVICE_NAME])
     _run([systemctl, "restart", BOOT_SERVICE_NAME])
