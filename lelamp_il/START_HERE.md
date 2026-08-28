@@ -205,23 +205,14 @@ bash ~/hermes-agent/plugins/lelamp/install_on_lamp.sh
 FileZilla：本地 `hermes-agent/lelamp_runtime/local_main.py` → 远端 `/home/spocklamp/lelamp_runtime/local_main.py`。
 `git pull` 失败时也覆盖 `lelamp_il/agent_hook.py`。
 
-开机自动醒来并听令（只做一次）：
+覆盖后重启已有开机服务（不要再跑 `--install-service`，stage 4 没有这个参数）：
 
 ```bash
-cd ~/lelamp_runtime
-sudo LELAMP_IL_DIR=/home/spocklamp/hermes-agent/lelamp_il \
-  .venv/bin/python local_main.py --install-service
+sudo systemctl restart lelamp-local
+journalctl -u lelamp-local -f
 ```
 
-这会关掉官方 `lelamp.service`（LiveKit `main.py` 抢串口），启用 `lelamp-local`：上电自动跑 `local_main.py` → 灯圈先从 0 渐亮到 80%（不占串口）→ 再连舵机播 `wake_up` → 等「你好 / 点头 / 看我 / 关灯 / 音乐」。不要同时再手动开一份 `--listen`。
-
-覆盖 `local_main.py` 之后必须再跑一次 `--install-service`（或 `install_on_lamp.sh --boot`），否则 systemd 仍是旧 unit。上一版 unit 的 `ExecStartPre` 含 `$()`，systemd 会当成变量，**根本不启动 Python**。
-
-装完立刻确认服务是 active，日志里应有 `lelamp-local-run 2026-08-28-boot3`、`exec …/python -u …/local_main.py`，然后是 `boot 2026-08-28-boot3`。若 journal 停在 `lelamp-local-run` 没有 `exec`，包装脚本还没跑完。
-
-```bash
-sudo .venv/bin/python local_main.py --boot-status
-```
+上电流程回到 stage 4：连舵机 + RGB → 按昼夜心情上色 → 立刻播 `wake_up` → 听「你好 / 点头 / 看我 / 关灯 / 音乐」。不要同时再手动开一份 `--listen`。启动日志应有 `look-at 2026-08-28-follow`。
 
 检测五个舵机（只 ping / 读位置，**不** `setup_motors` / calibrate）。开机服务占着串口时先停掉：
 
@@ -229,10 +220,7 @@ sudo .venv/bin/python local_main.py --boot-status
 sudo systemctl stop lelamp-local
 cd ~/lelamp_runtime
 sudo LELAMP_IL_DIR=/home/spocklamp/hermes-agent/lelamp_il \
-  .venv/bin/python local_main.py --check-motors
-# 五个都 OK 再看动作：
-# sudo LELAMP_IL_DIR=/home/spocklamp/hermes-agent/lelamp_il \
-#   .venv/bin/python local_main.py --check-motors --wiggle
+  .venv/bin/python ~/hermes-agent/lelamp_il/feetech_bus.py --probe
 sudo systemctl start lelamp-local
 ```
 

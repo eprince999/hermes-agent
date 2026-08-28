@@ -7,18 +7,6 @@ Snapshot 3 is the music-folder archive. This file is snapshot 4::
     mkdir -p ~/lelamp_runtime/lamp_snapshots
     cp local_main.py lamp_snapshots/stage4.py
 
-    sudo uv run python local_main.py --listen
-    sudo uv run python local_main.py --install-service
-    sudo uv run python local_main.py --boot-status
-    sudo uv run python local_main.py --check-motors
-    sudo uv run python local_main.py --check-motors --wiggle
-
-``--install-service`` writes systemd unit ``lelamp-local``: on boot the
-lamp runs this file, fades the RGB ring first (no serial), then opens
-the servo bus and plays wake_up. Official ``main.py`` /
-``lelamp.service`` stay untouched; that unit is disabled so it does not
-grab the serial port.
-
 Keep official ``main.py`` untouched. From the runtime repo root:
 
     sudo uv run python local_main.py
@@ -60,7 +48,6 @@ import pwd
 import queue
 import random
 import select
-import shlex
 import shutil
 import signal
 import subprocess
@@ -79,10 +66,6 @@ AGENT_STAGE = 4
 AGENT_LABEL = "vosk listen + music folder + look-at"
 # If the lamp prints「已看向画面中的人（6.0 秒）」it is still the old runtime copy.
 WATCH_REVISION = "2026-08-28-follow"
-# Printed at boot. If journal has no 2026-08-28-boot3, the Pi is still on the old unit.
-BOOT_REVISION = "2026-08-28-boot3"
-# USB CDC ACM often appears several seconds after systemd starts user services.
-SERIAL_WAIT_SECONDS = 45.0
 
 
 def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = None) -> Path:
@@ -99,330 +82,6 @@ def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = N
     shutil.copy2(Path(__file__).resolve(), dest)
     print(f"saved snapshot {dest}")
     return dest
-
-
-BOOT_SERVICE_NAME = "lelamp-local"
-BOOT_WRAPPER_NAME = "lelamp-local-run.sh"
-
-
-def _find_uv(home: Optional[Path] = None) -> Optional[Path]:
-    home = home or _effective_home()
-    candidates: List[Path] = []
-    which = shutil.which("uv")
-    if which:
-        candidates.append(Path(which))
-    candidates.extend(
-        [
-            home / ".local" / "bin" / "uv",
-            Path("/home/spocklamp/.local/bin/uv"),
-            Path("/usr/local/bin/uv"),
-            Path("/usr/bin/uv"),
-        ]
-    )
-    seen = set()
-    for path in candidates:
-        key = str(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        try:
-            if path.is_file() and os.access(path, os.X_OK):
-                return path
-        except OSError:
-            continue
-    return None
-
-
-def _runtime_python(runtime_dir: Path) -> Tuple[str, List[str]]:
-    """Interpreter for the systemd wrapper.
-
-    Use the runtime venv directly. ``uv run`` under systemd can sit on a
-    lock/sync/network and never exec local_main — journal then stops at
-    ``lelamp-local-run …`` with no Python lines.
-    """
-    for cand in (
-        runtime_dir / ".venv" / "bin" / "python",
-        runtime_dir / "venv" / "bin" / "python",
-    ):
-        if cand.is_file() and os.access(cand, os.X_OK):
-            return str(cand), [str(cand), "-u"]
-    uv = _find_uv()
-    if uv is not None:
-        return str(uv), [
-            str(uv),
-            "run",
-            "--offline",
-            "--no-sync",
-            "--directory",
-            str(runtime_dir),
-            "python",
-            "-u",
-        ]
-    return sys.executable, [sys.executable, "-u"]
-
-
-def wait_for_serial_port(port: str, *, timeout: float = SERIAL_WAIT_SECONDS) -> bool:
-    """Block until the Feetech USB serial node exists.
-
-    On a Pi Zero 2W cold boot, ``/dev/ttyACM0`` can show up tens of seconds
-    after ``local-fs.target``. Returning False means "start anyway" — RGB
-    still works, motors retry inside ``LocalLamp.start``.
-    """
-    path = Path(port)
-    deadline = time.monotonic() + max(0.0, float(timeout))
-    announced = False
-    while True:
-        if path.exists():
-            if announced:
-                print(f"舵机口到了 {port}", flush=True)
-            return True
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            print(f"等了 {timeout:.0f}s 还没有 {port}，先继续", flush=True)
-            return False
-        if not announced:
-            print(f"等待舵机口 {port}（最多 {timeout:.0f}s）…", flush=True)
-            announced = True
-        time.sleep(min(0.5, remaining))
-
-
-def boot_wrapper_script(
-    *,
-    runtime_dir: Path,
-    script: Path,
-    home: Path,
-    user: str,
-    il_dir: Path,
-    port: str = "/dev/ttyACM0",
-) -> str:
-    """Shell wrapper systemd ExecStart's. Keep `$` out of the unit file."""
-    _exe, prefix = _runtime_python(runtime_dir)
-    cmd = " ".join(shlex.quote(part) for part in prefix + [str(script), "--listen"])
-    serial = shlex.quote((port or "/dev/ttyACM0").strip() or "/dev/ttyACM0")
-    path_env = (
-        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:"
-        f"{home}/.local/bin:{runtime_dir}/.venv/bin"
-    )
-    return f"""#!/bin/bash
-export HOME={shlex.quote(str(home))}
-export USER={shlex.quote(user)}
-export SUDO_USER={shlex.quote(user)}
-export LELAMP_IL_DIR={shlex.quote(str(il_dir))}
-export LELAMP_LISTEN=1
-export PYTHONUNBUFFERED=1
-export UV_NO_SYNC=1
-export UV_OFFLINE=1
-export PATH={shlex.quote(path_env)}
-cd {shlex.quote(str(runtime_dir))} || exit 1
-echo "lelamp-local-run {BOOT_REVISION}" >&2
-if [ -e {serial} ]; then
-  echo "serial ready {serial}" >&2
-else
-  echo "serial missing {serial}, wait up to 8s" >&2
-  i=0
-  while [ "$i" -lt 8 ]; do
-    if [ -e {serial} ]; then
-      echo "serial ready {serial}" >&2
-      break
-    fi
-    i=$((i + 1))
-    sleep 1
-  done
-fi
-echo "exec {cmd}" >&2
-exec {cmd}
-echo "exec failed" >&2
-exit 127
-"""
-
-
-def boot_service_unit(
-    *,
-    runtime_dir: Path,
-    script: Path,
-    home: Path,
-    user: str,
-    il_dir: Path,
-    port: str = "/dev/ttyACM0",
-    wrapper: Optional[Path] = None,
-) -> str:
-    del script, home, user, il_dir, port  # paths live in the wrapper, not the unit
-    run = wrapper or (runtime_dir / BOOT_WRAPPER_NAME)
-    # No `$` and no ExecStartPre: a bad Pre line prevents ExecStart entirely.
-    return f"""[Unit]
-Description=LeLamp local agent (wake + listen, {BOOT_REVISION})
-After=local-fs.target
-StartLimitIntervalSec=0
-
-[Service]
-Type=simple
-WorkingDirectory={runtime_dir}
-TimeoutStartSec=90
-ExecStart=/bin/bash {run}
-Restart=always
-RestartSec=5
-StandardInput=null
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-"""
-
-
-def _systemctl_run(systemctl: str, args: List[str]) -> subprocess.CompletedProcess:
-    cmd = [systemctl, *args]
-    print("+ " + " ".join(cmd), flush=True)
-    proc = subprocess.run(cmd, check=False, text=True, capture_output=True)
-    out = (proc.stdout or "") + (proc.stderr or "")
-    if out.strip():
-        print(out.rstrip(), flush=True)
-    if proc.returncode != 0:
-        print(f"命令失败 exit={proc.returncode}", flush=True)
-    return proc
-
-
-def print_boot_status(
-    *,
-    runtime_dir: Optional[Path] = None,
-    unit_path: Optional[Path] = None,
-) -> int:
-    """Show whether systemd actually launched local_main (run on the lamp)."""
-    home = _effective_home()
-    runtime = Path(runtime_dir or (home / "lelamp_runtime")).resolve()
-    unit = Path(unit_path or "/etc/systemd/system/lelamp-local.service")
-    wrapper = runtime / BOOT_WRAPPER_NAME
-    script = runtime / "local_main.py"
-    print(f"boot-status {BOOT_REVISION}", flush=True)
-    for path in (
-        unit,
-        wrapper,
-        script,
-        runtime / ".venv" / "bin" / "python",
-        runtime / "venv" / "bin" / "python",
-    ):
-        exists = path.is_file()
-        exe = bool(exists and os.access(path, os.X_OK))
-        print(f"  {path} exists={exists} executable={exe}", flush=True)
-    if script.is_file():
-        for line in script.read_text(encoding="utf-8", errors="replace").splitlines():
-            if "BOOT_REVISION =" in line or "WATCH_REVISION =" in line:
-                print(f"  {line.strip()}", flush=True)
-    if unit.is_file():
-        print("--- unit ---", flush=True)
-        print(unit.read_text(encoding="utf-8", errors="replace"), end="", flush=True)
-    if wrapper.is_file():
-        print("--- wrapper ---", flush=True)
-        print(wrapper.read_text(encoding="utf-8", errors="replace"), end="", flush=True)
-    systemctl = shutil.which("systemctl")
-    if not systemctl:
-        print("没有 systemctl", flush=True)
-        return 0
-    for args in (
-        ["is-enabled", BOOT_SERVICE_NAME],
-        ["is-active", BOOT_SERVICE_NAME],
-        ["status", BOOT_SERVICE_NAME, "--no-pager", "-l"],
-    ):
-        _systemctl_run(systemctl, args)
-    journalctl = shutil.which("journalctl")
-    if journalctl:
-        print("+ journalctl -u lelamp-local -b -n 80", flush=True)
-        proc = subprocess.run(
-            [journalctl, "-u", BOOT_SERVICE_NAME, "-b", "--no-pager", "-n", "80"],
-            check=False,
-            text=True,
-            capture_output=True,
-        )
-        print((proc.stdout or proc.stderr or "").rstrip(), flush=True)
-    return 0
-
-
-def install_boot_service(
-    *,
-    runtime_dir: Optional[Path] = None,
-    unit_path: Optional[Path] = None,
-    enable: bool = True,
-) -> Path:
-    """Write systemd unit so the lamp wakes and listens after power-on."""
-    home = _effective_home()
-    user = (os.environ.get("SUDO_USER") or "").strip() or (
-        os.environ.get("USER") or "spocklamp"
-    )
-    runtime = Path(runtime_dir or (home / "lelamp_runtime")).resolve()
-    script = runtime / "local_main.py"
-    src = Path(__file__).resolve()
-    if src.is_file() and src.name == "local_main.py":
-        runtime.mkdir(parents=True, exist_ok=True)
-        if script.resolve() != src:
-            shutil.copy2(src, script)
-            snap = runtime / "lamp_snapshots"
-            snap.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, snap / "stage4.py")
-    il = Path(os.environ.get("LELAMP_IL_DIR") or (home / "hermes-agent" / "lelamp_il"))
-    port = (os.environ.get("LELAMP_PORT") or "/dev/ttyACM0").strip() or "/dev/ttyACM0"
-    wrapper = runtime / BOOT_WRAPPER_NAME
-    runtime.mkdir(parents=True, exist_ok=True)
-    wrapper.write_text(
-        boot_wrapper_script(
-            runtime_dir=runtime,
-            script=script if script.is_file() else src,
-            home=home,
-            user=user,
-            il_dir=il,
-            port=port,
-        ),
-        encoding="utf-8",
-    )
-    wrapper.chmod(0o755)
-    print(f"wrote {wrapper}", flush=True)
-    text = boot_service_unit(
-        runtime_dir=runtime,
-        script=script if script.is_file() else src,
-        home=home,
-        user=user,
-        il_dir=il,
-        port=port,
-        wrapper=wrapper,
-    )
-    dest = Path(unit_path or "/etc/systemd/system/lelamp-local.service")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(text, encoding="utf-8")
-    print(f"wrote {dest}", flush=True)
-    if "$" in text:
-        raise RuntimeError("unit 文件里不能有 $ ，否则 systemd 会当成变量、根本不启动")
-    if not enable:
-        return dest
-    systemctl = shutil.which("systemctl")
-    if not systemctl:
-        print("没有 systemctl，只写了 unit 文件。")
-        return dest
-
-    listed = subprocess.run(
-        [systemctl, "list-unit-files", "lelamp.service"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if "lelamp.service" in (listed.stdout or ""):
-        _systemctl_run(systemctl, ["stop", "lelamp.service"])
-        _systemctl_run(systemctl, ["disable", "lelamp.service"])
-    _systemctl_run(systemctl, ["daemon-reload"])
-    _systemctl_run(systemctl, ["reset-failed", BOOT_SERVICE_NAME])
-    enable_proc = _systemctl_run(systemctl, ["enable", BOOT_SERVICE_NAME])
-    restart_proc = _systemctl_run(systemctl, ["restart", BOOT_SERVICE_NAME])
-    time.sleep(1.0)
-    status_proc = _systemctl_run(systemctl, ["status", BOOT_SERVICE_NAME, "--no-pager", "-l"])
-    active_proc = _systemctl_run(systemctl, ["is-active", BOOT_SERVICE_NAME])
-    active = (active_proc.stdout or "").strip()
-    print(f"已开机自启 {BOOT_SERVICE_NAME}（{BOOT_REVISION}）。上电先亮灯，再连舵机做 wake_up。")
-    print(f"日志: journalctl -u {BOOT_SERVICE_NAME} -b --no-pager")
-    if enable_proc.returncode != 0 or restart_proc.returncode != 0 or active != "active":
-        print("服务现在没有 active。把上面的 status 整段发过来。", flush=True)
-        print_boot_status(runtime_dir=runtime, unit_path=dest)
-        if status_proc.returncode != 0:
-            return dest
-    return dest
-
 
 RECORDINGS = (
     "curious",
@@ -591,7 +250,7 @@ HELP_TEXT = """本地台灯 Stage 4（无 OpenAI）
 看人：看我 / 看着我 / 看过来（一直跟着画面里的人/手；说停、好了、别看了停下）
 灯光：开灯 / 关灯 / 暖光 / 冷光 / 自动 / 亮一点 / 暗一点
 音乐：音乐 / 下一首 / 停止音乐 / 大点声 / 小点声 / 循环播放 / 单曲循环
-说话：启动时加 --listen；开机自启：--install-service
+说话：启动时加 --listen（先 --download-vosk）
 其它：status  rgb 255 176 80  help  q
 """
 
@@ -615,42 +274,6 @@ def circadian_mood(hour: Optional[int] = None) -> Tuple[str, int]:
     if 17 <= h < 21:
         return "warm", 70
     return "night", 35
-
-
-WAKE_BRIGHTNESS = 80
-WAKE_FADE_SECONDS = 1.5
-WAKE_PLAY_FALLBACK_SECONDS = 3.5
-# After MotorsService.start(), wait before playing. Do not disable torque.
-SERVO_SETTLE_SECONDS = 2.5
-
-
-def recording_duration_seconds(name: str, *, fps: float = 30.0) -> float:
-    """Seconds for an official CSV recording, or a short fallback."""
-    home = _effective_home()
-    here = Path(__file__).resolve().parent
-    stem = (name or "").strip() or "wake_up"
-    candidates = (
-        here / "lelamp" / "recordings" / f"{stem}.csv",
-        here / "recordings" / f"{stem}.csv",
-        home / "lelamp_runtime" / "lelamp" / "recordings" / f"{stem}.csv",
-        home / "lelamp_runtime" / "recordings" / f"{stem}.csv",
-    )
-    for csv in candidates:
-        if not csv.is_file():
-            continue
-        try:
-            with csv.open(encoding="utf-8") as fh:
-                rows = sum(1 for line in fh if line.strip()) - 1
-            if rows > 0:
-                return rows / max(1.0, float(fps))
-        except OSError:
-            continue
-    return WAKE_PLAY_FALLBACK_SECONDS
-
-
-def wake_blackout_seconds(play_seconds: float, fade_seconds: float = WAKE_FADE_SECONDS) -> float:
-    """Hold the lamp black until the last `fade_seconds` of the wake motion."""
-    return max(0.0, float(play_seconds) - max(0.0, float(fade_seconds)))
 
 
 def resolve_expression(name: str) -> str:
@@ -1969,23 +1592,6 @@ def _stdin_is_tty() -> bool:
         return False
 
 
-def _env_flag(name: str) -> bool:
-    return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _want_listen(args: argparse.Namespace) -> bool:
-    if getattr(args, "repl", False):
-        return False
-    if getattr(args, "listen", False):
-        return True
-    if _env_flag("LELAMP_LISTEN"):
-        return True
-    # systemd sets INVOCATION_ID; boot unit should wait for voice, not EOF-quit.
-    if (os.environ.get("INVOCATION_ID") or "").strip():
-        return True
-    return False
-
-
 def _effective_home() -> Path:
     """Home of the real user, even when launched with sudo uv run."""
     sudo_user = (os.environ.get("SUDO_USER") or "").strip()
@@ -2032,103 +1638,6 @@ def resolve_look_at_artifacts() -> Tuple[Optional[Path], Optional[Path], Optiona
             if model.is_file() and meta.is_file():
                 return root, model, meta
     return None, None, None
-
-
-def _load_feetech_bus():
-    """Load lelamp_il/feetech_bus.py by path (same search as look-at)."""
-    seen = set()
-    for folder in look_at_search_roots():
-        for path in (folder / "feetech_bus.py", folder / "lelamp_il" / "feetech_bus.py"):
-            resolved = path.resolve() if path.is_file() else None
-            if resolved is None or resolved in seen:
-                continue
-            seen.add(resolved)
-            spec = importlib.util.spec_from_file_location(
-                f"lelamp_feetech_{abs(hash(str(resolved)))}",
-                resolved,
-            )
-            if spec is None or spec.loader is None:
-                continue
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            if callable(getattr(mod, "probe_servos", None)):
-                return mod
-    raise ImportError(
-        "找不到 feetech_bus.py。应在 /home/spocklamp/hermes-agent/lelamp_il/ 。"
-        "可设 LELAMP_IL_DIR=/home/spocklamp/hermes-agent/lelamp_il"
-    )
-
-
-def serial_port_users(port: str) -> List[str]:
-    """PIDs (and names if possible) holding the Feetech USB serial node."""
-    users: List[str] = []
-    fuser = shutil.which("fuser")
-    if fuser:
-        proc = subprocess.run(
-            [fuser, "-v", port],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        text = (proc.stdout or "") + (proc.stderr or "")
-        for raw in text.split():
-            if raw.isdigit() and raw not in users:
-                users.append(raw)
-    return users
-
-
-def check_motors(*, port: str, wiggle: bool = False) -> int:
-    """Ping five STS3215 servos and read positions. Does not calibrate."""
-    port = (port or "/dev/ttyACM0").strip() or "/dev/ttyACM0"
-    print(f"check-motors {port}", flush=True)
-    path = Path(port)
-    print(f"  节点 exists={path.exists()}", flush=True)
-    if not path.exists():
-        print("  没有串口。舵机 USB 没枚举，或口不是 ACM0。")
-        return 1
-    holders = serial_port_users(port)
-    if holders:
-        print(f"  串口被占用 PID={','.join(holders)}", flush=True)
-        print("  先停开机服务再测：sudo systemctl stop lelamp-local", flush=True)
-    else:
-        print("  串口空闲", flush=True)
-    try:
-        mod = _load_feetech_bus()
-        link, rows = mod.probe_servos(port)
-    except Exception as exc:
-        print(f"检测失败: {exc}", flush=True)
-        if holders:
-            print("多半是 lelamp-local 占着串口。停掉后再跑 --check-motors。", flush=True)
-        return 1
-    report = mod.format_probe_report(link, rows)
-    print(report, flush=True)
-    all_ok = bool(rows) and all(row.get("ok") for row in rows)
-    if wiggle and all_ok:
-        try:
-            from lelamp.service.motors.motors_service import MotorsService
-
-            print("五个都在，点头一次确认动作（不是校准）…", flush=True)
-            svc = MotorsService(port=port, lamp_id="lelamp", fps=30)
-            svc.start()
-            try:
-                svc.dispatch("play", "nod")
-                time.sleep(2.5)
-            finally:
-                for name in ("stop", "close", "disconnect"):
-                    fn = getattr(svc, name, None)
-                    if callable(fn):
-                        try:
-                            fn()
-                        except Exception:
-                            pass
-                        break
-            print("点头已发出。", flush=True)
-        except Exception as exc:
-            print(f"点头失败: {exc}", flush=True)
-            return 1
-    elif not wiggle and all_ok:
-        print("若要看动作，加 --wiggle（会点头一次，仍不校准）。", flush=True)
-    return 0 if all_ok else 1
 
 
 def _import_run_watch_person():
@@ -2210,35 +1719,14 @@ class LocalLamp:
 
     def start(self) -> None:
         folder = ensure_music_dir()
-        print(f"music 文件夹 {folder}", flush=True)
-        print(f"boot {BOOT_REVISION}", flush=True)
+        print(f"music 文件夹 {folder}")
         if self.sim:
-            print("[sim] skip motors/rgb connect", flush=True)
+            print("[sim] skip motors/rgb connect")
             return
-        # RGB does not use /dev/ttyACM0 — light up before claiming the bus.
-        self._try_start_rgb()
-        if self.rgb is not None:
-            mood, _circadian = circadian_mood()
-            self.brightness = 0
-            self._apply_rgb(MOOD_RGB[mood])
-        if self.rgb is None:
-            print("RGB 没起来，稍后再连舵机", flush=True)
-
-    def _ensure_motors(self) -> None:
-        """Open the Feetech bus after lights are on. Never disable torque."""
-        if self.sim or self.motors is not None:
-            return
-        self._try_start_motors()
-        if self.motors is not None:
-            print(
-                f"舵机已连接，等待 {SERVO_SETTLE_SECONDS:.1f}s（不关力矩）…",
-                flush=True,
-            )
-            time.sleep(SERVO_SETTLE_SECONDS)
-
-    def _try_start_rgb(self) -> None:
+        from lelamp.service.motors.motors_service import MotorsService
         from lelamp.service.rgb.rgb_service import RGBService
 
+        self.motors = MotorsService(port=self.port, lamp_id=self.lamp_id, fps=30)
         self.rgb = RGBService(
             led_count=self.led_count,
             led_pin=12,
@@ -2248,48 +1736,9 @@ class LocalLamp:
             led_invert=False,
             led_channel=0,
         )
-        last_exc: Optional[BaseException] = None
-        for attempt in range(1, 6):
-            try:
-                self.rgb.start()
-                print(f"rgb leds={self.led_count}", flush=True)
-                return
-            except Exception as exc:
-                last_exc = exc
-                print(f"RGB 第 {attempt} 次没起来: {exc}", flush=True)
-                time.sleep(1.0)
-        print(f"RGB 暂时不可用: {last_exc}", flush=True)
-        self.rgb = None
-
-    def _try_start_motors(self) -> None:
-        from lelamp.service.motors.motors_service import MotorsService
-
-        wait_for_serial_port(self.port)
-        deadline = time.monotonic() + SERIAL_WAIT_SECONDS
-        attempt = 0
-        last_exc: Optional[BaseException] = None
-        while True:
-            attempt += 1
-            svc = None
-            try:
-                svc = MotorsService(port=self.port, lamp_id=self.lamp_id, fps=30)
-                svc.start()
-            except Exception as exc:
-                last_exc = exc
-                print(f"舵机第 {attempt} 次没起来: {exc}", flush=True)
-                if svc is not None:
-                    self.motors = svc
-                    self._release_motors()
-                else:
-                    self.motors = None
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(1.5)
-                continue
-            self.motors = svc
-            print(f"motors on {self.port}", flush=True)
-            return
-        print(f"舵机暂时不可用，先亮灯听令: {last_exc}", flush=True)
+        self.motors.start()
+        self.rgb.start()
+        print(f"motors on {self.port}  rgb leds={self.led_count}")
 
     def stop(self) -> None:
         self.stop_watch_person()
@@ -2309,8 +1758,7 @@ class LocalLamp:
     def _play(self, recording: str, *, wait: bool = True) -> None:
         self.last_expression = recording
         if self.sim or self.motors is None:
-            why = "sim" if self.sim else "no motors"
-            print(f"[{why}] play {recording}", flush=True)
+            print(f"[sim] play {recording}")
             return
         self.motors.dispatch("play", recording)
 
@@ -2667,43 +2115,12 @@ class LocalLamp:
             return "好，不看了。"
         return ""
 
-    def fade_brightness(self, target: int, *, seconds: float = WAKE_FADE_SECONDS) -> None:
-        """Ramp LED brightness to target while keeping the current color."""
-        start = int(self.brightness)
-        goal = max(0, min(100, int(target)))
-        if self.sim:
-            self.brightness = goal
-            self._apply_rgb(self.base_rgb)
-            print(f"[sim] fade brightness {start} -> {goal}")
-            return
-        if start == goal or seconds <= 0:
-            self.brightness = goal
-            self._apply_rgb(self.base_rgb)
-            return
-        steps = max(8, int(round(float(seconds) * 20)))
-        dt = float(seconds) / steps
-        for i in range(1, steps + 1):
-            t = i / steps
-            self.brightness = int(round(start + (goal - start) * t))
-            self._apply_rgb(self.base_rgb)
-            time.sleep(dt)
-
     def wake(self) -> None:
-        """Fade lights first (no serial), then open servos and play wake_up."""
-        mood, _circadian = circadian_mood()
-        self.brightness = 0
+        mood, bri = circadian_mood()
+        self.brightness = bri
         self._apply_rgb(MOOD_RGB[mood])
-        self.fade_brightness(WAKE_BRIGHTNESS)
-        print("灯已亮。再连舵机做 wake_up（不关力矩）。", flush=True)
-        self._ensure_motors()
         self._play("wake_up")
-        if not self.sim and self.motors is not None:
-            time.sleep(recording_duration_seconds("wake_up"))
-        print(
-            f"台灯醒了。现在 {mood} 光，亮度 {self.brightness}%。"
-            "等你说话：你好、点头、看我、关灯、音乐。",
-            flush=True,
-        )
+        print(f"台灯醒了。现在 {mood} 光，亮度 {self.brightness}%。输入 help 看命令。")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2714,31 +2131,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--led-count", type=int, default=int(os.environ.get("LELAMP_LED_COUNT", "64")))
     parser.add_argument("--no-wake", action="store_true", help="skip wake_up on start")
     parser.add_argument("--listen", action="store_true", help="Stage 4: Vosk keywords, music folder, look-at")
-    parser.add_argument(
-        "--repl",
-        action="store_true",
-        help="keyboard prompt (do not auto-listen under systemd / LELAMP_LISTEN)",
-    )
-    parser.add_argument(
-        "--install-service",
-        action="store_true",
-        help="install systemd unit: wake + listen after power-on",
-    )
-    parser.add_argument(
-        "--boot-status",
-        action="store_true",
-        help="print systemd unit, wrapper, and journal for lelamp-local",
-    )
-    parser.add_argument(
-        "--check-motors",
-        action="store_true",
-        help="ping five STS3215 servos and read positions (no calibrate)",
-    )
-    parser.add_argument(
-        "--wiggle",
-        action="store_true",
-        help="with --check-motors, play nod once after a successful ping",
-    )
     parser.add_argument("--download-vosk", action="store_true", help="download offline Chinese Vosk model")
     parser.add_argument("--say", action="append", default=[], help="inject a spoken phrase (repeatable)")
     parser.add_argument("--device", type=int, default=None, help="sounddevice input index")
@@ -2772,15 +2164,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.snapshot is not None:
         snapshot_current(args.snapshot)
         return 0
-    if args.install_service:
-        install_boot_service()
-        return 0
-    if args.boot_status:
-        return print_boot_status()
-    if args.check_motors:
-        return check_motors(port=args.port, wiggle=args.wiggle)
     print(f"local_main  stage {AGENT_STAGE}  ({AGENT_LABEL})")
-    print(f"boot {BOOT_REVISION}", flush=True)
     print(
         f"look-at {WATCH_REVISION}  {Path(__file__).resolve()}  "
         "（看我会一直跟；若结束打印「6.0 秒」=还在跑旧脚本）"
@@ -2802,31 +2186,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         led_count=args.led_count,
         brightness=70,
     )
+    lamp.start()
     try:
-        try:
-            lamp.start()
-        except Exception as exc:
-            print(f"硬件启动失败（仍会听令）: {exc}", flush=True)
         if not args.no_wake:
-            try:
-                lamp.wake()
-            except Exception as exc:
-                print(f"醒来动作失败（仍会听令）: {exc}", flush=True)
-                try:
-                    lamp.brightness = WAKE_BRIGHTNESS
-                    lamp._apply_rgb(lamp.base_rgb)
-                except Exception:
-                    pass
-        try:
-            lamp._ensure_motors()
-        except Exception as exc:
-            print(f"舵机稍后可用: {exc}", flush=True)
+            lamp.wake()
         for phrase in args.say:
             if apply_speech(lamp, phrase) == "quit":
                 return 0
-        if args.say and not _want_listen(args):
+        if args.say and not args.listen:
             return 0
-        if _want_listen(args):
+        if args.listen:
             model_path = args.model if args.model is not None else vosk_model_dir()
             return run_listen_loop(lamp, device=args.device, model_path=Path(model_path))
         while True:

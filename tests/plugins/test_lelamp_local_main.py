@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
 
 from plugins.lelamp.local_main import (
@@ -234,85 +233,48 @@ def test_sim_express_then_off_updates_state():
     assert lamp.brightness == 85
 
 
-def test_sim_wake_fades_from_black_then_plays_wake_up():
-    from plugins.lelamp.local_main import WAKE_BRIGHTNESS, _scale_rgb
+def test_sim_wake_is_circadian_then_wake_up():
+    from plugins.lelamp.local_main import MOOD_RGB, _scale_rgb, circadian_mood
 
     lamp = LocalLamp(
         sim=True,
         port="/dev/null",
         lamp_id="lelamp",
         led_count=64,
-        brightness=70,
+        brightness=1,
     )
     order: list[str] = []
-    orig_fade = lamp.fade_brightness
+    orig_apply = lamp._apply_rgb
     orig_play = lamp._play
-    orig_ensure = lamp._ensure_motors
 
-    def fade(target, **kwargs):
-        order.append("fade")
-        return orig_fade(target, **kwargs)
+    def apply(rgb):
+        order.append("rgb")
+        return orig_apply(rgb)
 
     def play(recording, **kwargs):
         order.append("play")
         return orig_play(recording, **kwargs)
 
-    def ensure():
-        order.append("motors")
-        return orig_ensure()
-
-    lamp.fade_brightness = fade  # type: ignore[method-assign]
+    lamp._apply_rgb = apply  # type: ignore[method-assign]
     lamp._play = play  # type: ignore[method-assign]
-    lamp._ensure_motors = ensure  # type: ignore[method-assign]
     lamp.wake()
-    assert order == ["fade", "motors", "play"]
+    mood, bri = circadian_mood()
+    assert order == ["rgb", "play"]
     assert lamp.last_expression == "wake_up"
-    assert lamp.brightness == WAKE_BRIGHTNESS == 80
-    assert lamp.last_rgb == _scale_rgb(lamp.base_rgb, 80)
+    assert lamp.brightness == bri
+    assert lamp.base_rgb == MOOD_RGB[mood]
+    assert lamp.last_rgb == _scale_rgb(MOOD_RGB[mood], bri)
 
 
-def test_start_does_not_open_servos(monkeypatch):
+def test_stdin_is_tty_skips_dev_null(monkeypatch):
     from plugins.lelamp import local_main
 
-    opened = {"motors": 0}
+    class ClosedStdin:
+        def isatty(self):
+            return False
 
-    def fake_rgb(self):
-        self.rgb = None
-
-    def fake_motors(self):
-        opened["motors"] += 1
-
-    monkeypatch.setattr(local_main.LocalLamp, "_try_start_rgb", fake_rgb)
-    monkeypatch.setattr(local_main.LocalLamp, "_try_start_motors", fake_motors)
-    lamp = local_main.LocalLamp(
-        sim=False,
-        port="/dev/null",
-        lamp_id="lelamp",
-        led_count=64,
-        brightness=70,
-    )
-    lamp.start()
-    assert opened["motors"] == 0
-
-
-def test_wake_blackout_covers_all_but_the_tail():
-    from plugins.lelamp.local_main import wake_blackout_seconds
-
-    assert wake_blackout_seconds(3.5, 1.5) == 2.0
-    assert wake_blackout_seconds(1.0, 1.5) == 0.0
-
-
-def test_recording_duration_reads_csv(tmp_path, monkeypatch):
-    from plugins.lelamp import local_main
-
-    rec = tmp_path / "lelamp_runtime" / "lelamp" / "recordings"
-    rec.mkdir(parents=True)
-    (rec / "wake_up.csv").write_text(
-        "t,a\n" + "\n".join(f"{i},0" for i in range(90)),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(local_main, "_effective_home", lambda: tmp_path)
-    assert local_main.recording_duration_seconds("wake_up", fps=30.0) == 3.0
+    monkeypatch.setattr(local_main.sys, "stdin", ClosedStdin())
+    assert local_main._stdin_is_tty() is False
 
 
 def test_main_sim_scripted_session(monkeypatch, capsys):
@@ -326,179 +288,6 @@ def test_main_sim_scripted_session(monkeypatch, capsys):
     assert "expression=nod" in out
     assert "好，我先歇着。" in out
     assert "music 文件夹" in out
-
-
-def test_boot_service_unit_wakes_and_listens(tmp_path):
-    from plugins.lelamp import local_main
-
-    unit = tmp_path / "lelamp-local.service"
-    dest = local_main.install_boot_service(
-        runtime_dir=tmp_path / "runtime",
-        unit_path=unit,
-        enable=False,
-    )
-    text = dest.read_text(encoding="utf-8")
-    assert dest == unit
-    assert "$" not in text
-    assert "$(" not in text
-    assert "ExecStartPre" not in text
-    assert "sound.target" not in text
-    assert "StartLimitIntervalSec=0" in text
-    assert "WantedBy=multi-user.target" in text
-    assert local_main.BOOT_REVISION in text
-    assert "lelamp-local-run.sh" in text
-    wrapper = tmp_path / "runtime" / "lelamp-local-run.sh"
-    assert wrapper.is_file()
-    body = wrapper.read_text(encoding="utf-8")
-    assert "--listen" in body
-    assert "ttyACM0" in body
-    assert "LELAMP_LISTEN=1" in body
-    copied = tmp_path / "runtime" / "local_main.py"
-    assert copied.is_file()
-    copied_text = copied.read_text(encoding="utf-8")
-    assert 'WATCH_REVISION = "2026-08-28-follow"' in copied_text
-    assert 'BOOT_REVISION = "2026-08-28-boot3"' in copied_text
-    assert "exec " in body
-    assert "UV_OFFLINE=1" in body
-
-
-def test_boot_wrapper_uses_venv_python_not_uv(tmp_path):
-    from plugins.lelamp import local_main
-
-    runtime = tmp_path / "runtime"
-    venv_py = runtime / ".venv" / "bin" / "python"
-    venv_py.parent.mkdir(parents=True)
-    venv_py.write_text("#!/bin/sh\n", encoding="utf-8")
-    venv_py.chmod(0o755)
-    dest = local_main.install_boot_service(
-        runtime_dir=runtime,
-        unit_path=tmp_path / "lelamp-local.service",
-        enable=False,
-    )
-    body = (runtime / "lelamp-local-run.sh").read_text(encoding="utf-8")
-    assert ".venv/bin/python" in body
-    assert " uv " not in body
-    assert "$" not in dest.read_text(encoding="utf-8")
-
-
-def test_wait_for_serial_port_finds_existing_node(tmp_path):
-    from plugins.lelamp.local_main import wait_for_serial_port
-
-    port = tmp_path / "ttyACM0"
-    port.write_text("", encoding="utf-8")
-    assert wait_for_serial_port(str(port), timeout=1.0) is True
-
-
-def test_wait_for_serial_port_times_out(tmp_path):
-    from plugins.lelamp.local_main import wait_for_serial_port
-
-    missing = tmp_path / "missing-acm"
-    t0 = time.monotonic()
-    assert wait_for_serial_port(str(missing), timeout=0.25) is False
-    assert time.monotonic() - t0 < 1.5
-
-
-def test_check_motors_missing_port(tmp_path, capsys):
-    from plugins.lelamp import local_main
-
-    missing = tmp_path / "no-acm"
-    assert local_main.main(["--check-motors", "--port", str(missing)]) == 1
-    assert "没有串口" in capsys.readouterr().out
-
-
-def test_check_motors_all_five_ok(monkeypatch, tmp_path, capsys):
-    from plugins.lelamp import local_main
-
-    port = tmp_path / "ttyACM0"
-    port.write_text("", encoding="utf-8")
-    names = ("base_yaw", "base_pitch", "elbow_pitch", "wrist_roll", "wrist_pitch")
-    rows = [
-        {"id": i, "name": name, "ok": True, "degrees": 1.0, "detail": "ticks=2048"}
-        for i, name in enumerate(names, start=1)
-    ]
-
-    class FakeBus:
-        @staticmethod
-        def probe_servos(_port):
-            return "STS3215 fake baud=1000000", rows
-
-        @staticmethod
-        def format_probe_report(link, _rows):
-            return f"链路 {link}\n5/5 个舵机应答\n五个舵机都正常（只读检测，没有重新校准）。"
-
-    monkeypatch.setattr(local_main, "_load_feetech_bus", lambda: FakeBus)
-    monkeypatch.setattr(local_main, "serial_port_users", lambda _p: [])
-    assert local_main.main(["--check-motors", "--port", str(port)]) == 0
-    out = capsys.readouterr().out
-    assert "5/5" in out
-    assert "没有重新校准" in out
-
-
-def test_check_motors_busy_port_still_explains(monkeypatch, tmp_path, capsys):
-    from plugins.lelamp import local_main
-
-    port = tmp_path / "ttyACM0"
-    port.write_text("", encoding="utf-8")
-
-    def boom(_port):
-        raise RuntimeError("device busy")
-
-    class FakeBus:
-        probe_servos = staticmethod(boom)
-
-    monkeypatch.setattr(local_main, "_load_feetech_bus", lambda: FakeBus)
-    monkeypatch.setattr(local_main, "serial_port_users", lambda _p: ["1234"])
-    assert local_main.main(["--check-motors", "--port", str(port)]) == 1
-    out = capsys.readouterr().out
-    assert "PID=1234" in out
-    assert "stop lelamp-local" in out
-
-
-def test_wake_failure_still_listens(monkeypatch):
-    from plugins.lelamp import local_main
-
-    seen = {}
-
-    def boom(_self):
-        raise RuntimeError("rgb down")
-
-    def fake_listen(lamp, *, device, model_path):
-        seen["listen"] = True
-        return 0
-
-    monkeypatch.setattr(local_main.LocalLamp, "wake", boom)
-    monkeypatch.setattr(local_main, "run_listen_loop", fake_listen)
-    monkeypatch.setenv("LELAMP_LISTEN", "1")
-    assert local_main.main(["--sim"]) == 0
-    assert seen.get("listen") is True
-
-
-def test_lelamp_listen_env_skips_repl(monkeypatch):
-    from plugins.lelamp import local_main
-
-    seen = {}
-
-    def fake_listen(lamp, *, device, model_path):
-        seen["listen"] = True
-        return 0
-
-    monkeypatch.setenv("LELAMP_LISTEN", "1")
-    monkeypatch.setattr(local_main, "run_listen_loop", fake_listen)
-    assert local_main.main(["--sim", "--no-wake"]) == 0
-    assert seen.get("listen") is True
-
-
-def test_repl_flag_overrides_listen_env(monkeypatch):
-    from plugins.lelamp import local_main
-
-    monkeypatch.setenv("LELAMP_LISTEN", "1")
-    monkeypatch.setattr("builtins.input", lambda _prompt="": "q")
-    monkeypatch.setattr(
-        local_main,
-        "run_listen_loop",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not listen")),
-    )
-    assert local_main.main(["--sim", "--no-wake", "--repl"]) == 0
 
 
 def test_extract_spoken_command_from_padded_asr():
@@ -583,7 +372,6 @@ def test_tracked_stage2_archive_has_no_music_player():
     installer = root.parent / "install_on_lamp.sh"
     script = installer.read_text(encoding="utf-8")
     assert "2026-08-28-follow" in script
-    assert "2026-08-28-boot3" in script
     assert 'DEST="$DEST_DIR/local_main.py"' in script
 
 

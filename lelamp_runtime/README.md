@@ -10,13 +10,12 @@ FileZilla：本地选仓库里的 `lelamp_runtime/local_main.py`，远端选 `~/
 
 不要把 `record_demo.py` 放进这个目录。音乐、Vosk 模型仍用灯上 runtime 里已有的 `music/` 和 `models/`。
 
-开机自启（上电醒来，等中文指令）：
+覆盖后重启已有开机服务：
 
 ```bash
-cd ~/lelamp_runtime
-sudo LELAMP_IL_DIR=/home/spocklamp/hermes-agent/lelamp_il \
-  .venv/bin/python local_main.py --install-service
+sudo systemctl restart lelamp-local
 ```
 
 之后不要再手动开一份 `--listen`。看日志：`journalctl -u lelamp-local -f`
 
+醒来是 stage 4：昼夜心情色 + 立刻播 `wake_up`。
