@@ -196,14 +196,15 @@ python infer_pi.py --model artifacts/tiny_lamp_int8.onnx --meta artifacts/meta.j
     --port /dev/ttyACM0 --steps 60
 ```
 
-然后把训好的模型拷回灯。灯上跑的是 `~/lelamp_runtime/local_main.py`，**不是**仓库里那份；`agent_hook.py` 也要是新的，否则仍会打印「6.0 秒」然后停：
+然后把训好的模型拷回灯。灯上跑的是 `~/lelamp_runtime/local_main.py`。覆盖这一份（推荐脚本）：
 
 ```bash
-scp artifacts/tiny_lamp_int8.onnx artifacts/meta.json pi@lamp:~/hermes-agent/lelamp_il/artifacts/
-# 在灯上（两份都要覆盖）：
-cp ~/hermes-agent/plugins/lelamp/local_main.py ~/lelamp_runtime/local_main.py
-# agent_hook.py 已在 ~/hermes-agent/lelamp_il/ ；git pull 失败就用 FileZilla 覆盖这一份
+bash ~/hermes-agent/plugins/lelamp/install_on_lamp.sh
 ```
+
+FileZilla：本地 `hermes-agent/lelamp_runtime/local_main.py` → 远端 `/home/spocklamp/lelamp_runtime/local_main.py`。
+`git pull` 失败时也覆盖 `lelamp_il/agent_hook.py`。
+
 
 最后再开语音：
 

@@ -321,6 +321,14 @@ def test_tracked_stage2_archive_has_no_music_player():
     assert stage4 == runnable
     assert stage3 != runnable
     assert not (root / "stage5.py").is_file()
+    dropin = (
+        Path(__file__).resolve().parents[2] / "lelamp_runtime" / "local_main.py"
+    )
+    assert dropin.read_text(encoding="utf-8") == runnable
+    installer = root.parent / "install_on_lamp.sh"
+    script = installer.read_text(encoding="utf-8")
+    assert "2026-08-28-follow" in script
+    assert 'DEST="$DEST_DIR/local_main.py"' in script
 
 
 def test_main_sim_say_phrases_without_repl(capsys):
