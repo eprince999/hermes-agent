@@ -19,12 +19,7 @@ def _il_path() -> str:
     return str(ROOT / "lelamp_il")
 
 
-def test_infer_pi_uses_record_demo_camera():
-    source = (ROOT / "lelamp_il" / "infer_pi.py").read_text(encoding="utf-8")
-    assert "PiOrWebcam" in source
-    assert "def close_camera" in source
-    assert "kind == \"lelamp\"" in source
-
+def test_revision_fingerprint_is_stream_not_old_cam():
     source = RECORD.read_text(encoding="utf-8")
     assert f'RECORD_DEMO_REVISION = "{REVISION}"' in source
     assert "MjpegLiveStream" in source
@@ -33,6 +28,19 @@ def test_infer_pi_uses_record_demo_camera():
     wrapper = WRAPPER.read_text(encoding="utf-8")
     assert REVISION in wrapper
     assert "record_demo.py" in wrapper
+
+
+def test_infer_pi_uses_record_demo_camera():
+    source = (ROOT / "lelamp_il" / "infer_pi.py").read_text(encoding="utf-8")
+    assert "PiOrWebcam" in source
+    assert "def close_camera" in source
+    assert "kind == \"lelamp\"" in source
+
+
+def test_infer_motor_bus_does_not_require_lerobot_calibration():
+    source = (ROOT / "lelamp_il" / "infer_pi.py").read_text(encoding="utf-8")
+    assert "无需 lerobot 校准" in source
+    assert source.find("Sts3215Bus") < source.find("MotorNormMode.DEGREES")
 
 
 def test_mjpeg_splitter_extracts_one_frame_and_keeps_rest():

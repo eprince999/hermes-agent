@@ -142,7 +142,13 @@ def close_camera(camera) -> None:
 
 
 class MotorBus:
-    """Feetech wrapper. Prefers lerobot, then scservo_sdk. Dummy if neither works."""
+    """Talk to the five STS3215s in the same units as record_demo.py.
+
+    Official lerobot FeetechMotorsBus in DEGREES mode requires a
+    calibration file the lamp does not have. Recording already fell
+    through to Sts3215Bus / Sts3215RawBus; inference must use that path
+    too, or read_joints() raises ``has no calibration registered``.
+    """
 
     def __init__(self, port: str | None, joint_names: list[str]) -> None:
         self.port = port
@@ -153,35 +159,67 @@ class MotorBus:
         if not port:
             print("no --port: running without motors")
             return
+        errors: list[str] = []
+        if self._connect_sts():
+            return
+        if self._connect_lerobot(errors):
+            return
+        print("舵机回退失败: " + " | ".join(errors) + "；dummy joints only")
+
+    def _connect_sts(self) -> bool:
+        from feetech_bus import Sts3215Bus, Sts3215RawBus, add_runtime_site_packages
+
+        add_runtime_site_packages()
+        for cls in (Sts3215Bus, Sts3215RawBus):
+            try:
+                sts = cls(self.port, tuple(self.joint_names))
+                label = sts.connect()
+                sts.enable_torque()
+                probe = sts.read_degrees()
+                self._sts = sts
+                pretty = " ".join(
+                    f"{name}={probe[name]:+6.1f}" for name in self.joint_names
+                )
+                print(f"{label}  力矩已开（无需 lerobot 校准）  当前={pretty}")
+                return True
+            except Exception as exc:
+                print(f"    {cls.__name__} 不可用: {exc}", flush=True)
+        return False
+
+    def _connect_lerobot(self, errors: list[str]) -> bool:
         try:
             from lerobot.motors import Motor, MotorNormMode
             from lerobot.motors.feetech import FeetechMotorsBus
         except Exception as exc:
-            self._connect_sts(str(exc))
-            return
-        motors = {
-            name: Motor(i + 1, "sts3215", MotorNormMode.DEGREES)
-            for i, name in enumerate(joint_names)
-        }
-        self._bus = FeetechMotorsBus(port=port, motors=motors)
-        self._bus.connect()
-        print(f"connected Feetech bus on {port}")
-
-    def _connect_sts(self, lerobot_exc: str) -> None:
-        from feetech_bus import Sts3215Bus, Sts3215RawBus, add_runtime_site_packages
-
-        add_runtime_site_packages()
-        errors = [f"lerobot: {lerobot_exc}"]
-        for cls in (Sts3215Bus, Sts3215RawBus):
-            try:
-                sts = cls(self.port, tuple(self.joint_names))
-                print(sts.connect())
-                sts.enable_torque()
-                self._sts = sts
-                return
-            except Exception as exc:
-                errors.append(f"{cls.__name__}: {exc}")
-        print("舵机回退失败: " + " | ".join(errors) + "；dummy joints only")
+            errors.append(f"lerobot import: {exc}")
+            return False
+        bus = None
+        try:
+            motors = {
+                name: Motor(i + 1, "sts3215", MotorNormMode.DEGREES)
+                for i, name in enumerate(self.joint_names)
+            }
+            bus = FeetechMotorsBus(port=self.port, motors=motors)
+            bus.connect()
+            present = bus.sync_read("Present_Position")
+            self._bus = bus
+            print(f"connected Feetech bus on {self.port}")
+            _ = present
+            return True
+        except Exception as exc:
+            errors.append(f"lerobot Feetech: {exc}")
+            if bus is not None:
+                try:
+                    bus.disconnect(True)
+                except TypeError:
+                    try:
+                        bus.disconnect()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            self._bus = None
+            return False
 
     def read_joints(self) -> np.ndarray:
         if self._sts is not None:
