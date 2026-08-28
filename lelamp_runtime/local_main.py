@@ -9,6 +9,7 @@ Snapshot 3 is the music-folder archive. This file is snapshot 4::
 
     sudo uv run python local_main.py --listen
     sudo uv run python local_main.py --install-service
+    sudo uv run python local_main.py --boot-status
 
 ``--install-service`` writes systemd unit ``lelamp-local``: on boot the
 lamp wakes (wake_up) and waits for Chinese voice commands. Official
@@ -56,6 +57,7 @@ import pwd
 import queue
 import random
 import select
+import shlex
 import shutil
 import signal
 import subprocess
@@ -74,8 +76,8 @@ AGENT_STAGE = 4
 AGENT_LABEL = "vosk listen + music folder + look-at"
 # If the lamp prints「已看向画面中的人（6.0 秒）」it is still the old runtime copy.
 WATCH_REVISION = "2026-08-28-follow"
-# Printed at boot. If journal has no 2026-08-28-boot, the Pi is still on the old unit.
-BOOT_REVISION = "2026-08-28-boot"
+# Printed at boot. If journal has no 2026-08-28-boot2, the Pi is still on the old unit.
+BOOT_REVISION = "2026-08-28-boot2"
 # USB CDC ACM often appears several seconds after systemd starts user services.
 SERIAL_WAIT_SECONDS = 45.0
 
@@ -97,19 +99,52 @@ def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = N
 
 
 BOOT_SERVICE_NAME = "lelamp-local"
+BOOT_WRAPPER_NAME = "lelamp-local-run.sh"
+
+
+def _find_uv(home: Optional[Path] = None) -> Optional[Path]:
+    home = home or _effective_home()
+    candidates: List[Path] = []
+    which = shutil.which("uv")
+    if which:
+        candidates.append(Path(which))
+    candidates.extend(
+        [
+            home / ".local" / "bin" / "uv",
+            Path("/home/spocklamp/.local/bin/uv"),
+            Path("/usr/local/bin/uv"),
+            Path("/usr/bin/uv"),
+        ]
+    )
+    seen = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if path.is_file() and os.access(path, os.X_OK):
+                return path
+        except OSError:
+            continue
+    return None
 
 
 def _runtime_python(runtime_dir: Path) -> Tuple[str, List[str]]:
-    """Return (executable, argv_prefix) for ExecStart."""
+    """Return (executable, argv_prefix) for the boot wrapper.
+
+    Prefer the same ``uv run`` the lamp already uses by hand. Fall back to
+    the runtime venv, then the current interpreter.
+    """
+    uv = _find_uv()
+    if uv is not None:
+        return str(uv), [str(uv), "run", "--directory", str(runtime_dir), "python"]
     for cand in (
         runtime_dir / ".venv" / "bin" / "python",
         runtime_dir / "venv" / "bin" / "python",
     ):
         if cand.is_file():
             return str(cand), [str(cand)]
-    uv = shutil.which("uv")
-    if uv:
-        return uv, [uv, "run", "python"]
     return sys.executable, [sys.executable]
 
 
@@ -138,7 +173,7 @@ def wait_for_serial_port(port: str, *, timeout: float = SERIAL_WAIT_SECONDS) -> 
         time.sleep(min(0.5, remaining))
 
 
-def boot_service_unit(
+def boot_wrapper_script(
     *,
     runtime_dir: Path,
     script: Path,
@@ -147,18 +182,49 @@ def boot_service_unit(
     il_dir: Path,
     port: str = "/dev/ttyACM0",
 ) -> str:
+    """Shell wrapper systemd ExecStart's. Keep `$` out of the unit file."""
     _exe, prefix = _runtime_python(runtime_dir)
-    args = " ".join(prefix + [str(script), "--listen"])
-    serial = (port or "/dev/ttyACM0").strip() or "/dev/ttyACM0"
-    # Wait for ACM but always continue — a missing node must not fail the unit.
-    wait_acm = (
-        "/bin/bash -c 'for i in $(seq 1 45); do "
-        f"[ -e {serial} ] && exit 0; sleep 1; done; exit 0'"
-    )
+    cmd = " ".join(shlex.quote(part) for part in prefix + [str(script), "--listen"])
+    serial = shlex.quote((port or "/dev/ttyACM0").strip() or "/dev/ttyACM0")
     path_env = (
         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:"
         f"{home}/.local/bin:{runtime_dir}/.venv/bin"
     )
+    return f"""#!/bin/bash
+export HOME={shlex.quote(str(home))}
+export USER={shlex.quote(user)}
+export SUDO_USER={shlex.quote(user)}
+export LELAMP_IL_DIR={shlex.quote(str(il_dir))}
+export LELAMP_LISTEN=1
+export PYTHONUNBUFFERED=1
+export PATH={shlex.quote(path_env)}
+cd {shlex.quote(str(runtime_dir))} || exit 1
+echo "lelamp-local-run {BOOT_REVISION}" >&2
+i=0
+while [ "$i" -lt 45 ]; do
+  if [ -e {serial} ]; then
+    break
+  fi
+  i=$((i + 1))
+  sleep 1
+done
+exec {cmd}
+"""
+
+
+def boot_service_unit(
+    *,
+    runtime_dir: Path,
+    script: Path,
+    home: Path,
+    user: str,
+    il_dir: Path,
+    port: str = "/dev/ttyACM0",
+    wrapper: Optional[Path] = None,
+) -> str:
+    del script, home, user, il_dir, port  # paths live in the wrapper, not the unit
+    run = wrapper or (runtime_dir / BOOT_WRAPPER_NAME)
+    # No `$` and no ExecStartPre: a bad Pre line prevents ExecStart entirely.
     return f"""[Unit]
 Description=LeLamp local agent (wake + listen, {BOOT_REVISION})
 After=local-fs.target
@@ -167,16 +233,8 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 WorkingDirectory={runtime_dir}
-Environment=HOME={home}
-Environment=USER={user}
-Environment=SUDO_USER={user}
-Environment=LELAMP_IL_DIR={il_dir}
-Environment=LELAMP_LISTEN=1
-Environment=PYTHONUNBUFFERED=1
-Environment=PATH={path_env}
 TimeoutStartSec=90
-ExecStartPre={wait_acm}
-ExecStart={args}
+ExecStart=/bin/bash {run}
 Restart=always
 RestartSec=5
 StandardInput=null
@@ -186,6 +244,73 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 """
+
+
+def _systemctl_run(systemctl: str, args: List[str]) -> subprocess.CompletedProcess:
+    cmd = [systemctl, *args]
+    print("+ " + " ".join(cmd), flush=True)
+    proc = subprocess.run(cmd, check=False, text=True, capture_output=True)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    if out.strip():
+        print(out.rstrip(), flush=True)
+    if proc.returncode != 0:
+        print(f"命令失败 exit={proc.returncode}", flush=True)
+    return proc
+
+
+def print_boot_status(
+    *,
+    runtime_dir: Optional[Path] = None,
+    unit_path: Optional[Path] = None,
+) -> int:
+    """Show whether systemd actually launched local_main (run on the lamp)."""
+    home = _effective_home()
+    runtime = Path(runtime_dir or (home / "lelamp_runtime")).resolve()
+    unit = Path(unit_path or "/etc/systemd/system/lelamp-local.service")
+    wrapper = runtime / BOOT_WRAPPER_NAME
+    script = runtime / "local_main.py"
+    print(f"boot-status {BOOT_REVISION}", flush=True)
+    for path in (
+        unit,
+        wrapper,
+        script,
+        runtime / ".venv" / "bin" / "python",
+        runtime / "venv" / "bin" / "python",
+    ):
+        exists = path.is_file()
+        exe = bool(exists and os.access(path, os.X_OK))
+        print(f"  {path} exists={exists} executable={exe}", flush=True)
+    if script.is_file():
+        for line in script.read_text(encoding="utf-8", errors="replace").splitlines():
+            if "BOOT_REVISION =" in line or "WATCH_REVISION =" in line:
+                print(f"  {line.strip()}", flush=True)
+    if unit.is_file():
+        print("--- unit ---", flush=True)
+        print(unit.read_text(encoding="utf-8", errors="replace"), end="", flush=True)
+    if wrapper.is_file():
+        print("--- wrapper ---", flush=True)
+        print(wrapper.read_text(encoding="utf-8", errors="replace"), end="", flush=True)
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        print("没有 systemctl", flush=True)
+        return 0
+    for args in (
+        ["is-enabled", BOOT_SERVICE_NAME],
+        ["is-active", BOOT_SERVICE_NAME],
+        ["status", BOOT_SERVICE_NAME, "--no-pager", "-l"],
+    ):
+        _systemctl_run(systemctl, args)
+    journalctl = shutil.which("journalctl")
+    if journalctl:
+        print("+ journalctl -u lelamp-local -b -n 80", flush=True)
+        proc = subprocess.run(
+            [journalctl, "-u", BOOT_SERVICE_NAME, "-b", "--no-pager", "-n", "80"],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        print((proc.stdout or proc.stderr or "").rstrip(), flush=True)
+    return 0
 
 
 def install_boot_service(
@@ -211,6 +336,21 @@ def install_boot_service(
             shutil.copy2(src, snap / "stage4.py")
     il = Path(os.environ.get("LELAMP_IL_DIR") or (home / "hermes-agent" / "lelamp_il"))
     port = (os.environ.get("LELAMP_PORT") or "/dev/ttyACM0").strip() or "/dev/ttyACM0"
+    wrapper = runtime / BOOT_WRAPPER_NAME
+    runtime.mkdir(parents=True, exist_ok=True)
+    wrapper.write_text(
+        boot_wrapper_script(
+            runtime_dir=runtime,
+            script=script if script.is_file() else src,
+            home=home,
+            user=user,
+            il_dir=il,
+            port=port,
+        ),
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    print(f"wrote {wrapper}", flush=True)
     text = boot_service_unit(
         runtime_dir=runtime,
         script=script if script.is_file() else src,
@@ -218,25 +358,20 @@ def install_boot_service(
         user=user,
         il_dir=il,
         port=port,
+        wrapper=wrapper,
     )
     dest = Path(unit_path or "/etc/systemd/system/lelamp-local.service")
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(text, encoding="utf-8")
-    print(f"wrote {dest}")
+    print(f"wrote {dest}", flush=True)
+    if "$" in text:
+        raise RuntimeError("unit 文件里不能有 $ ，否则 systemd 会当成变量、根本不启动")
     if not enable:
         return dest
     systemctl = shutil.which("systemctl")
     if not systemctl:
         print("没有 systemctl，只写了 unit 文件。")
         return dest
-
-    def _run(cmd: List[str], *, quiet: bool = False) -> None:
-        subprocess.run(
-            cmd,
-            check=False,
-            capture_output=quiet,
-            text=True,
-        )
 
     listed = subprocess.run(
         [systemctl, "list-unit-files", "lelamp.service"],
@@ -245,13 +380,23 @@ def install_boot_service(
         text=True,
     )
     if "lelamp.service" in (listed.stdout or ""):
-        _run([systemctl, "stop", "lelamp.service"], quiet=True)
-        _run([systemctl, "disable", "lelamp.service"], quiet=True)
-    _run([systemctl, "daemon-reload"])
-    _run([systemctl, "enable", BOOT_SERVICE_NAME])
-    _run([systemctl, "restart", BOOT_SERVICE_NAME])
+        _systemctl_run(systemctl, ["stop", "lelamp.service"])
+        _systemctl_run(systemctl, ["disable", "lelamp.service"])
+    _systemctl_run(systemctl, ["daemon-reload"])
+    _systemctl_run(systemctl, ["reset-failed", BOOT_SERVICE_NAME])
+    enable_proc = _systemctl_run(systemctl, ["enable", BOOT_SERVICE_NAME])
+    restart_proc = _systemctl_run(systemctl, ["restart", BOOT_SERVICE_NAME])
+    time.sleep(1.0)
+    status_proc = _systemctl_run(systemctl, ["status", BOOT_SERVICE_NAME, "--no-pager", "-l"])
+    active_proc = _systemctl_run(systemctl, ["is-active", BOOT_SERVICE_NAME])
+    active = (active_proc.stdout or "").strip()
     print(f"已开机自启 {BOOT_SERVICE_NAME}（{BOOT_REVISION}）。上电会闪一下再醒来。")
-    print(f"日志: journalctl -u {BOOT_SERVICE_NAME} -f")
+    print(f"日志: journalctl -u {BOOT_SERVICE_NAME} -b --no-pager")
+    if enable_proc.returncode != 0 or restart_proc.returncode != 0 or active != "active":
+        print("服务现在没有 active。把上面的 status 整段发过来。", flush=True)
+        print_boot_status(runtime_dir=runtime, unit_path=dest)
+        if status_proc.returncode != 0:
+            return dest
     return dest
 
 
@@ -2455,6 +2600,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="install systemd unit: wake + listen after power-on",
     )
+    parser.add_argument(
+        "--boot-status",
+        action="store_true",
+        help="print systemd unit, wrapper, and journal for lelamp-local",
+    )
     parser.add_argument("--download-vosk", action="store_true", help="download offline Chinese Vosk model")
     parser.add_argument("--say", action="append", default=[], help="inject a spoken phrase (repeatable)")
     parser.add_argument("--device", type=int, default=None, help="sounddevice input index")
@@ -2491,6 +2641,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.install_service:
         install_boot_service()
         return 0
+    if args.boot_status:
+        return print_boot_status()
     print(f"local_main  stage {AGENT_STAGE}  ({AGENT_LABEL})")
     print(f"boot {BOOT_REVISION}", flush=True)
     print(

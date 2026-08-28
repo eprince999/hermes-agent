@@ -294,18 +294,25 @@ def test_boot_service_unit_wakes_and_listens(tmp_path):
     )
     text = dest.read_text(encoding="utf-8")
     assert dest == unit
-    assert "--listen" in text
-    assert "WantedBy=multi-user.target" in text
-    assert "LELAMP_LISTEN=1" in text
-    assert "wake" in text.lower() or "Chinese" in text or "listen" in text.lower()
-    assert "StartLimitIntervalSec=0" in text
+    assert "$" not in text
+    assert "$(" not in text
+    assert "ExecStartPre" not in text
     assert "sound.target" not in text
-    assert "ttyACM0" in text
+    assert "StartLimitIntervalSec=0" in text
+    assert "WantedBy=multi-user.target" in text
     assert local_main.BOOT_REVISION in text
+    assert "lelamp-local-run.sh" in text
+    wrapper = tmp_path / "runtime" / "lelamp-local-run.sh"
+    assert wrapper.is_file()
+    body = wrapper.read_text(encoding="utf-8")
+    assert "--listen" in body
+    assert "ttyACM0" in body
+    assert "LELAMP_LISTEN=1" in body
     copied = tmp_path / "runtime" / "local_main.py"
     assert copied.is_file()
-    assert 'WATCH_REVISION = "2026-08-28-follow"' in copied.read_text(encoding="utf-8")
-    assert 'BOOT_REVISION = "2026-08-28-boot"' in copied.read_text(encoding="utf-8")
+    copied_text = copied.read_text(encoding="utf-8")
+    assert 'WATCH_REVISION = "2026-08-28-follow"' in copied_text
+    assert 'BOOT_REVISION = "2026-08-28-boot2"' in copied_text
 
 
 def test_wait_for_serial_port_finds_existing_node(tmp_path):
@@ -454,6 +461,7 @@ def test_tracked_stage2_archive_has_no_music_player():
     installer = root.parent / "install_on_lamp.sh"
     script = installer.read_text(encoding="utf-8")
     assert "2026-08-28-follow" in script
+    assert "2026-08-28-boot2" in script
     assert 'DEST="$DEST_DIR/local_main.py"' in script
 
 

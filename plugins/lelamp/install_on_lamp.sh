@@ -2,7 +2,7 @@
 # Copy the Stage-4 Chinese/music/look-at agent onto the lamp runtime.
 # The process that actually runs is ~/lelamp_runtime/local_main.py — not
 # the copy inside hermes-agent. Saying 「看我」 and getting「6.0 秒」means
-# this copy was skipped. Cold-boot lights need BOOT_REVISION=2026-08-28-boot
+# this copy was skipped. Cold-boot lights need BOOT_REVISION=2026-08-28-boot2
 # in the systemd unit (re-run with --boot after copying).
 set -euo pipefail
 
@@ -54,6 +54,8 @@ echo "  cd $DEST_DIR"
 echo "  sudo LELAMP_IL_DIR=\$HOME/hermes-agent/lelamp_il uv run python local_main.py --listen"
 echo "开机自启（上电醒来并等命令）："
 echo "  sudo $DEST_DIR/.venv/bin/python $DEST --install-service"
-echo "启动应看到: look-at ${REV} 以及 boot 2026-08-28-boot"
+echo "启动应看到: look-at ${REV} 以及 boot 2026-08-28-boot2"
 echo "关机再开机灯不亮时，覆盖脚本后再装一次服务："
 echo "  bash $HERE/install_on_lamp.sh --boot"
+echo "装完立刻看是否 active："
+echo "  sudo $DEST --boot-status"
