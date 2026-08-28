@@ -14,10 +14,10 @@ Snapshot 3 is the music-folder archive. This file is snapshot 4::
     sudo uv run python local_main.py --check-motors --wiggle
 
 ``--install-service`` writes systemd unit ``lelamp-local``: on boot the
-lamp runs this file, plays wake_up in the dark, fades 0→80% in the last
-1.5s, then waits for Chinese voice commands. Official ``main.py`` /
-``lelamp.service`` stay untouched; that unit is disabled so it does not
-grab the serial port.
+lamp runs this file, waits for the servos (torque left on), fades
+0→80% from the start, then plays wake_up and waits for Chinese voice
+commands. Official ``main.py`` / ``lelamp.service`` stay untouched;
+that unit is disabled so it does not grab the serial port.
 
 Keep official ``main.py`` untouched. From the runtime repo root:
 
@@ -414,7 +414,7 @@ def install_boot_service(
     status_proc = _systemctl_run(systemctl, ["status", BOOT_SERVICE_NAME, "--no-pager", "-l"])
     active_proc = _systemctl_run(systemctl, ["is-active", BOOT_SERVICE_NAME])
     active = (active_proc.stdout or "").strip()
-    print(f"已开机自启 {BOOT_SERVICE_NAME}（{BOOT_REVISION}）。上电跑 local_main：全黑做 wake_up，最后 1.5 秒渐亮到 80%。")
+    print(f"已开机自启 {BOOT_SERVICE_NAME}（{BOOT_REVISION}）。上电跑 local_main：等舵机 → 灯先渐亮 → 再 wake_up。")
     print(f"日志: journalctl -u {BOOT_SERVICE_NAME} -b --no-pager")
     if enable_proc.returncode != 0 or restart_proc.returncode != 0 or active != "active":
         print("服务现在没有 active。把上面的 status 整段发过来。", flush=True)
@@ -620,6 +620,8 @@ def circadian_mood(hour: Optional[int] = None) -> Tuple[str, int]:
 WAKE_BRIGHTNESS = 80
 WAKE_FADE_SECONDS = 1.5
 WAKE_PLAY_FALLBACK_SECONDS = 3.5
+# After MotorsService.start(), wait before playing. Do not disable torque.
+SERVO_SETTLE_SECONDS = 2.5
 
 
 def recording_duration_seconds(name: str, *, fps: float = 30.0) -> float:
@@ -2214,12 +2216,15 @@ class LocalLamp:
             print("[sim] skip motors/rgb connect", flush=True)
             return
         self._try_start_rgb()
-        # Stay black until wake() fades in the last 1.5s of wake_up.
+        # Black until wake() fades in from the start, then plays wake_up.
         if self.rgb is not None:
             mood, _circadian = circadian_mood()
             self.brightness = 0
             self._apply_rgb(MOOD_RGB[mood])
         self._try_start_motors()
+        if not self.sim and self.motors is not None:
+            print(f"舵机已连接，等待 {SERVO_SETTLE_SECONDS:.1f}s（不关力矩）…", flush=True)
+            time.sleep(SERVO_SETTLE_SECONDS)
         if self.rgb is None and self.motors is None:
             raise RuntimeError(f"RGB 和舵机都没起来（口 {self.port}）")
 
@@ -2676,14 +2681,14 @@ class LocalLamp:
             time.sleep(dt)
 
     def wake(self) -> None:
-        """Play wake_up in the dark, then fade 0→80% over the last 1.5s."""
+        """Fade 0→80% from the start, then play wake_up. Never disable torque."""
         mood, _circadian = circadian_mood()
         self.brightness = 0
         self._apply_rgb(MOOD_RGB[mood])
-        self._play("wake_up")
-        if not self.sim:
-            time.sleep(wake_blackout_seconds(recording_duration_seconds("wake_up")))
         self.fade_brightness(WAKE_BRIGHTNESS)
+        self._play("wake_up")
+        if not self.sim and self.motors is not None:
+            time.sleep(recording_duration_seconds("wake_up"))
         print(
             f"台灯醒了。现在 {mood} 光，亮度 {self.brightness}%。"
             "等你说话：你好、点头、看我、关灯、音乐。",

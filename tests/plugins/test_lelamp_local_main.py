@@ -234,7 +234,7 @@ def test_sim_express_then_off_updates_state():
     assert lamp.brightness == 85
 
 
-def test_sim_wake_fades_from_black_to_80_at_motion_tail():
+def test_sim_wake_fades_from_black_then_plays_wake_up():
     from plugins.lelamp.local_main import WAKE_BRIGHTNESS, _scale_rgb
 
     lamp = LocalLamp(
@@ -244,7 +244,22 @@ def test_sim_wake_fades_from_black_to_80_at_motion_tail():
         led_count=64,
         brightness=70,
     )
+    order: list[str] = []
+    orig_fade = lamp.fade_brightness
+    orig_play = lamp._play
+
+    def fade(target, **kwargs):
+        order.append("fade")
+        return orig_fade(target, **kwargs)
+
+    def play(recording, **kwargs):
+        order.append("play")
+        return orig_play(recording, **kwargs)
+
+    lamp.fade_brightness = fade  # type: ignore[method-assign]
+    lamp._play = play  # type: ignore[method-assign]
     lamp.wake()
+    assert order == ["fade", "play"]
     assert lamp.last_expression == "wake_up"
     assert lamp.brightness == WAKE_BRIGHTNESS == 80
     assert lamp.last_rgb == _scale_rgb(lamp.base_rgb, 80)
