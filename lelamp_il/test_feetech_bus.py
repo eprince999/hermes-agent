@@ -75,6 +75,11 @@ class ConnectFallbackTests(unittest.TestCase):
         self.assertIn("raw STS3215", msg)
         self.assertIn("没有灯时才加 --dummy", msg)
 
+    def test_pi_detector_returns_bool(self) -> None:
+        from record_demo import _is_raspberry_pi
+
+        self.assertIsInstance(_is_raspberry_pi(), bool)
+
 
 if __name__ == "__main__":
     unittest.main()

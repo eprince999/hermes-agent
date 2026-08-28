@@ -64,7 +64,7 @@ cd ~/hermes-agent/lelamp_il
 bash enable_pi_camera.sh
 ```
 
-启动时必须看到 `revision 2026-08-28-raw-sts`。没有这一行就还是旧文件：
+启动时必须看到 `revision 2026-08-28-cam`。没有这一行就还是旧文件：
 
 ```bash
 cd ~/hermes-agent
@@ -89,8 +89,9 @@ sudo uv run python ~/hermes-agent/lelamp_il/record_demo.py --task look_at_person
 2 段没报错后，再录到大约 50 段，换左/中/右、近/远。
 
 ```bash
-python record_demo.py --task look_at_person --port /dev/ttyACM0 --id lelamp \
-    --episodes 50 --seconds 6
+cd ~/lelamp_runtime
+sudo uv run python ~/hermes-agent/lelamp_il/record_demo.py --task look_at_person \
+    --port /dev/ttyACM0 --id lelamp --episodes 50 --seconds 6
 ```
 
 ---
@@ -100,7 +101,7 @@ python record_demo.py --task look_at_person --port /dev/ttyACM0 --id lelamp \
 把 `data/look_at_person/` 拷回笔记本（若录在 Pi 上）：
 
 ```bash
-scp -r pi@lamp:~/lelamp/lelamp_il/data/look_at_person ./data/
+scp -r spocklamp@raspberrypi:~/hermes-agent/lelamp_il/data/look_at_person ./data/
 python train.py --data ./data/look_at_person --epochs 40 --export ./artifacts
 ```
 

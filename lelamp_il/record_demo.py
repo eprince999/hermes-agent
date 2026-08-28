@@ -29,6 +29,7 @@ import math
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -45,7 +46,7 @@ from feetech_bus import (
     uv_run_hint,
 )
 
-RECORD_DEMO_REVISION = "2026-08-28-raw-sts"
+RECORD_DEMO_REVISION = "2026-08-28-cam"
 
 add_runtime_site_packages()
 
@@ -248,6 +249,47 @@ class DummyJoints(JointSource):
         return
 
 
+def _is_raspberry_pi() -> bool:
+    try:
+        model = Path("/proc/device-tree/model").read_text(errors="ignore").lower()
+    except OSError:
+        model = ""
+    return "raspberry pi" in model or Path("/usr/bin/rpicam-hello").exists()
+
+
+def _camera_holders() -> str:
+    cmd = [
+        "fuser",
+        "-v",
+        "/dev/video0",
+        "/dev/video1",
+        "/dev/media0",
+        "/dev/media1",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+    return (result.stdout or result.stderr or "").strip()
+
+
+def _picamera_capture(cam, timeout_s: float = 8.0):
+    try:
+        return cam.capture_array("main", wait=timeout_s)
+    except TypeError:
+        return cam.capture_array()
+
+
+def _stop_picamera(cam) -> None:
+    for name in ("stop", "close"):
+        fn = getattr(cam, name, None)
+        if callable(fn):
+            try:
+                fn()
+            except Exception:
+                pass
+
+
 def _fmt_joints(values: dict[str, float]) -> str:
     parts = []
     for name in JOINT_NAMES:
@@ -271,48 +313,77 @@ class PiOrWebcam(CameraSource):
 
     def connect(self) -> str:
         errors: list[str] = []
+        holders = _camera_holders()
+        if holders:
+            print(f"    警告: 摄像头可能被占用:\n{holders}", flush=True)
+            print("    先停 rpicam-hello / 语音 agent / 另一个 python，再录。", flush=True)
 
         try:
             from picamera2 import Picamera2
 
+            print("    picamera2: 正在初始化 CSI（Module 3 第一次可能要几秒）...", flush=True)
+            stuck = threading.Event()
+
+            def _nudge() -> None:
+                if not stuck.wait(12):
+                    print(
+                        "    仍在等 libcamera。超过 20 秒请 Ctrl-C，然后: sudo pkill -f rpicam",
+                        flush=True,
+                    )
+
+            threading.Thread(target=_nudge, daemon=True).start()
             cam = Picamera2()
-            configs = [
-                cam.create_preview_configuration(
-                    main={"size": (self.width, self.height)}
-                ),
-                cam.create_preview_configuration(
-                    main={"size": (640, 480), "format": "XBGR8888"}
-                ),
-                cam.create_still_configuration(
-                    main={"size": (self.width, self.height)}
-                ),
+            stuck.set()
+            config_tries = [
+                {"size": (640, 480), "format": "XBGR8888"},
+                {"size": (self.width, self.height), "format": "XBGR8888"},
+                {"size": (640, 480)},
+                {"size": (self.width, self.height)},
             ]
             last_exc: Exception | None = None
-            for config in configs:
+            for spec in config_tries:
+                print(f"    picamera2: 尝试 {spec} ...", flush=True)
                 try:
+                    kwargs = {"main": spec, "buffer_count": 1}
+                    try:
+                        config = cam.create_preview_configuration(**kwargs)
+                    except TypeError:
+                        config = cam.create_preview_configuration(main=spec)
                     cam.configure(config)
                     cam.start()
-                    time.sleep(0.6)
-                    _ = cam.capture_array()
+                    time.sleep(0.4)
+                    _ = _picamera_capture(cam, timeout_s=8.0)
                     self._kind, self._handle = "picamera2", cam
-                    return f"Pi Camera {self.width}x{self.height} (picamera2)"
+                    w, h = spec.get("size", (self.width, self.height))
+                    return f"Pi Camera {w}x{h} (picamera2)"
                 except Exception as exc:
                     last_exc = exc
-                    try:
-                        cam.stop()
-                    except Exception:
-                        pass
+                    print(f"    picamera2: {spec} 失败: {exc}", flush=True)
+                    _stop_picamera(cam)
             errors.append(f"picamera2: {last_exc}")
         except Exception as exc:
             errors.append(f"picamera2: {exc}")
+            print(f"    picamera2 不可用: {exc}", flush=True)
+
+        if _is_raspberry_pi():
+            hint = (
+                "树莓派灯头 CSI 不要走 OpenCV（/dev/video0 会一直卡住）。\n"
+                "  sudo pkill -f rpicam || true\n"
+                "  bash ~/hermes-agent/lelamp_il/enable_pi_camera.sh\n"
+                "  然后: cd ~/lelamp_runtime && sudo uv run python "
+                "~/hermes-agent/lelamp_il/record_demo.py --task look_at_person "
+                "--port /dev/ttyACM0 --id lelamp --episodes 2 --seconds 6"
+            )
+            raise RuntimeError(
+                "没有摄像头可用。\n  - " + "\n  - ".join(errors) + "\n" + hint
+            )
 
         try:
             import cv2
 
-            # CSI cameras are not /dev/video0 on a Pi. Only try OpenCV if those nodes exist.
             nodes = [p for p in (Path("/dev/video0"), Path("/dev/video1")) if p.exists()]
             if not nodes:
-                errors.append("opencv: 没有 /dev/video0（灯头 CSI 请用 picamera2，不要走 OpenCV）")
+                errors.append("opencv: 没有 /dev/video0")
             else:
                 for path in nodes:
                     cap = cv2.VideoCapture(str(path))
@@ -329,20 +400,11 @@ class PiOrWebcam(CameraSource):
         except Exception as exc:
             errors.append(f"opencv: {exc}")
 
-        hint = (
-            "Camera Module 3 要用系统 picamera2（不要 pip install）：\n"
-            "  echo 'Acquire::ForceIPv4 \"true\";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4\n"
-            "  sudo apt-get update && sudo apt-get install -y python3-picamera2 python3-libcamera\n"
-            "  /usr/bin/python3 -c \"from picamera2 import Picamera2; print('system ok')\"\n"
-            "  编辑 ~/lelamp_runtime/.venv/pyvenv.cfg：include-system-site-packages = true\n"
-            "  deactivate 后再 source 进 venv，重新 import\n"
-            "  或直接跑：bash enable_pi_camera.sh"
-        )
-        raise RuntimeError("没有摄像头可用。\n  - " + "\n  - ".join(errors) + "\n" + hint)
+        raise RuntimeError("没有摄像头可用。\n  - " + "\n  - ".join(errors))
 
     def grab(self) -> Image.Image:
         if self._kind == "picamera2":
-            arr = self._handle.capture_array()
+            arr = _picamera_capture(self._handle, timeout_s=2.0)
             return Image.fromarray(arr).convert("RGB")
         ok, frame = self._handle.read()
         if not ok:
@@ -354,7 +416,7 @@ class PiOrWebcam(CameraSource):
         if self._kind == "cv2" and self._handle is not None:
             self._handle.release()
         if self._kind == "picamera2" and self._handle is not None:
-            self._handle.stop()
+            _stop_picamera(self._handle)
         self._handle = None
 
 
