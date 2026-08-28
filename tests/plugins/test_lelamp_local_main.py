@@ -233,6 +233,37 @@ def test_sim_express_then_off_updates_state():
     assert lamp.brightness == 85
 
 
+def test_sim_wake_fades_to_full_brightness_after_motion():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    lamp.wake()
+    assert lamp.last_expression == "wake_up"
+    assert lamp.brightness == 100
+    assert lamp.last_rgb == (
+        lamp.base_rgb[0],
+        lamp.base_rgb[1],
+        lamp.base_rgb[2],
+    )
+
+
+def test_recording_duration_reads_csv(tmp_path, monkeypatch):
+    from plugins.lelamp import local_main
+
+    rec = tmp_path / "lelamp_runtime" / "lelamp" / "recordings"
+    rec.mkdir(parents=True)
+    (rec / "wake_up.csv").write_text(
+        "t,a\n" + "\n".join(f"{i},0" for i in range(90)),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(local_main, "_effective_home", lambda: tmp_path)
+    assert local_main.recording_duration_seconds("wake_up", fps=30.0) == 3.0
+
+
 def test_main_sim_scripted_session(monkeypatch, capsys):
     from plugins.lelamp import local_main
 
