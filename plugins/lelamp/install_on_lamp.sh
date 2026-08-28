@@ -38,7 +38,19 @@ fi
 echo "已写入 $DEST"
 grep -n "WATCH_REVISION" "$DEST" | head -n 1
 echo
+if [[ "${1:-}" == "--boot" || "${1:-}" == "--service" ]]; then
+  PYTHON="$DEST_DIR/.venv/bin/python"
+  if [[ ! -x "$PYTHON" ]]; then
+    PYTHON="$DEST_DIR/venv/bin/python"
+  fi
+  echo "安装开机自启（醒来 + 听令）..."
+  sudo LELAMP_IL_DIR="${LELAMP_IL_DIR:-$HOME/hermes-agent/lelamp_il}" \
+    "$PYTHON" "$DEST" --install-service
+  exit 0
+fi
 echo "下一步（先 Ctrl-C 掉旧的 local_main）："
 echo "  cd $DEST_DIR"
 echo "  sudo LELAMP_IL_DIR=\$HOME/hermes-agent/lelamp_il uv run python local_main.py --listen"
+echo "开机自启（上电醒来并等命令）："
+echo "  sudo $DEST_DIR/.venv/bin/python $DEST --install-service"
 echo "启动应看到: look-at ${REV}"

@@ -7,6 +7,14 @@ Snapshot 3 is the music-folder archive. This file is snapshot 4::
     mkdir -p ~/lelamp_runtime/lamp_snapshots
     cp local_main.py lamp_snapshots/stage4.py
 
+    sudo uv run python local_main.py --listen
+    sudo uv run python local_main.py --install-service
+
+``--install-service`` writes systemd unit ``lelamp-local``: on boot the
+lamp wakes (wake_up) and waits for Chinese voice commands. Official
+``main.py`` / ``lelamp.service`` stay untouched; that unit is disabled
+so it does not grab the serial port.
+
 Keep official ``main.py`` untouched. From the runtime repo root:
 
     sudo uv run python local_main.py
@@ -82,6 +90,114 @@ def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = N
     shutil.copy2(Path(__file__).resolve(), dest)
     print(f"saved snapshot {dest}")
     return dest
+
+
+BOOT_SERVICE_NAME = "lelamp-local"
+
+
+def _runtime_python(runtime_dir: Path) -> Tuple[str, List[str]]:
+    """Return (executable, argv_prefix) for ExecStart."""
+    for cand in (
+        runtime_dir / ".venv" / "bin" / "python",
+        runtime_dir / "venv" / "bin" / "python",
+    ):
+        if cand.is_file():
+            return str(cand), [str(cand)]
+    uv = shutil.which("uv")
+    if uv:
+        return uv, [uv, "run", "python"]
+    return sys.executable, [sys.executable]
+
+
+def boot_service_unit(
+    *,
+    runtime_dir: Path,
+    script: Path,
+    home: Path,
+    user: str,
+    il_dir: Path,
+) -> str:
+    _exe, prefix = _runtime_python(runtime_dir)
+    args = " ".join(prefix + [str(script), "--listen"])
+    return f"""[Unit]
+Description=LeLamp local agent (wake + wait for Chinese commands)
+After=local-fs.target sound.target
+Wants=sound.target
+
+[Service]
+Type=simple
+WorkingDirectory={runtime_dir}
+Environment=HOME={home}
+Environment=USER={user}
+Environment=SUDO_USER={user}
+Environment=LELAMP_IL_DIR={il_dir}
+Environment=LELAMP_LISTEN=1
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/bin/sleep 2
+ExecStart={args}
+Restart=always
+RestartSec=4
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def install_boot_service(
+    *,
+    runtime_dir: Optional[Path] = None,
+    unit_path: Optional[Path] = None,
+    enable: bool = True,
+) -> Path:
+    """Write systemd unit so the lamp wakes and listens after power-on."""
+    home = _effective_home()
+    user = (os.environ.get("SUDO_USER") or "").strip() or (
+        os.environ.get("USER") or "spocklamp"
+    )
+    runtime = Path(runtime_dir or (home / "lelamp_runtime")).resolve()
+    script = runtime / "local_main.py"
+    src = Path(__file__).resolve()
+    if src.is_file() and src.name == "local_main.py":
+        runtime.mkdir(parents=True, exist_ok=True)
+        if script.resolve() != src:
+            shutil.copy2(src, script)
+            snap = runtime / "lamp_snapshots"
+            snap.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, snap / "stage4.py")
+    il = Path(os.environ.get("LELAMP_IL_DIR") or (home / "hermes-agent" / "lelamp_il"))
+    text = boot_service_unit(
+        runtime_dir=runtime,
+        script=script if script.is_file() else src,
+        home=home,
+        user=user,
+        il_dir=il,
+    )
+    dest = Path(unit_path or "/etc/systemd/system/lelamp-local.service")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text, encoding="utf-8")
+    print(f"wrote {dest}")
+    if not enable:
+        return dest
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        print("没有 systemctl，只写了 unit 文件。")
+        return dest
+
+    def _run(cmd: List[str]) -> None:
+        subprocess.run(cmd, check=False)
+
+    _run([systemctl, "stop", "lelamp.service"])
+    _run([systemctl, "disable", "lelamp.service"])
+    _run([systemctl, "daemon-reload"])
+    _run([systemctl, "enable", BOOT_SERVICE_NAME])
+    _run([systemctl, "restart", BOOT_SERVICE_NAME])
+    print(f"已开机自启 {BOOT_SERVICE_NAME}。上电会醒来并等你说话。")
+    print(f"日志: journalctl -u {BOOT_SERVICE_NAME} -f")
+    return dest
+
 
 RECORDINGS = (
     "curious",
@@ -250,7 +366,7 @@ HELP_TEXT = """本地台灯 Stage 4（无 OpenAI）
 看人：看我 / 看着我 / 看过来（一直跟着画面里的人/手；说停、好了、别看了停下）
 灯光：开灯 / 关灯 / 暖光 / 冷光 / 自动 / 亮一点 / 暗一点
 音乐：音乐 / 下一首 / 停止音乐 / 大点声 / 小点声 / 循环播放 / 单曲循环
-说话：启动时加 --listen（先 --download-vosk）
+说话：启动时加 --listen；开机自启：--install-service
 其它：status  rgb 255 176 80  help  q
 """
 
@@ -1568,7 +1684,7 @@ def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path)
                 print()
                 if apply_speech(lamp, item) == "quit":
                     return 0
-            if select.select([sys.stdin], [], [], 0)[0]:
+            if _stdin_is_tty() and select.select([sys.stdin], [], [], 0)[0]:
                 line = sys.stdin.readline()
                 if line == "":
                     print("好，我先歇着。")
@@ -1582,6 +1698,31 @@ def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path)
         return 0
     finally:
         stop.set()
+
+
+def _stdin_is_tty() -> bool:
+    """Keyboard REPL is only for a real terminal. systemd stdin is /dev/null."""
+    try:
+        return bool(sys.stdin.isatty())
+    except Exception:
+        return False
+
+
+def _env_flag(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _want_listen(args: argparse.Namespace) -> bool:
+    if getattr(args, "repl", False):
+        return False
+    if getattr(args, "listen", False):
+        return True
+    if _env_flag("LELAMP_LISTEN"):
+        return True
+    # systemd sets INVOCATION_ID; boot unit should wait for voice, not EOF-quit.
+    if (os.environ.get("INVOCATION_ID") or "").strip():
+        return True
+    return False
 
 
 def _effective_home() -> Path:
@@ -2112,7 +2253,7 @@ class LocalLamp:
         self.brightness = bri
         self._apply_rgb(MOOD_RGB[mood])
         self._play("wake_up")
-        print(f"台灯醒了。现在 {mood} 光，亮度 {self.brightness}%。输入 help 看命令。")
+        print(f"台灯醒了。现在 {mood} 光，亮度 {self.brightness}%。等你说话：你好、点头、看我、关灯、音乐。")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2123,6 +2264,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--led-count", type=int, default=int(os.environ.get("LELAMP_LED_COUNT", "64")))
     parser.add_argument("--no-wake", action="store_true", help="skip wake_up on start")
     parser.add_argument("--listen", action="store_true", help="Stage 4: Vosk keywords, music folder, look-at")
+    parser.add_argument(
+        "--repl",
+        action="store_true",
+        help="keyboard prompt (do not auto-listen under systemd / LELAMP_LISTEN)",
+    )
+    parser.add_argument(
+        "--install-service",
+        action="store_true",
+        help="install systemd unit: wake + listen after power-on",
+    )
     parser.add_argument("--download-vosk", action="store_true", help="download offline Chinese Vosk model")
     parser.add_argument("--say", action="append", default=[], help="inject a spoken phrase (repeatable)")
     parser.add_argument("--device", type=int, default=None, help="sounddevice input index")
@@ -2156,6 +2307,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.snapshot is not None:
         snapshot_current(args.snapshot)
         return 0
+    if args.install_service:
+        install_boot_service()
+        return 0
     print(f"local_main  stage {AGENT_STAGE}  ({AGENT_LABEL})")
     print(
         f"look-at {WATCH_REVISION}  {Path(__file__).resolve()}  "
@@ -2185,9 +2339,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for phrase in args.say:
             if apply_speech(lamp, phrase) == "quit":
                 return 0
-        if args.say and not args.listen:
+        if args.say and not _want_listen(args):
             return 0
-        if args.listen:
+        if _want_listen(args):
             model_path = args.model if args.model is not None else vosk_model_dir()
             return run_listen_loop(lamp, device=args.device, model_path=Path(model_path))
         while True:

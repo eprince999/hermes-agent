@@ -205,13 +205,17 @@ bash ~/hermes-agent/plugins/lelamp/install_on_lamp.sh
 FileZilla：本地 `hermes-agent/lelamp_runtime/local_main.py` → 远端 `/home/spocklamp/lelamp_runtime/local_main.py`。
 `git pull` 失败时也覆盖 `lelamp_il/agent_hook.py`。
 
-
-最后再开语音：
+开机自动醒来并听令（只做一次）：
 
 ```bash
 cd ~/lelamp_runtime
-sudo uv run python local_main.py --listen
+sudo LELAMP_IL_DIR=/home/spocklamp/hermes-agent/lelamp_il \
+  .venv/bin/python local_main.py --install-service
 ```
+
+这会关掉官方 `lelamp.service`（LiveKit `main.py` 抢串口），启用 `lelamp-local`：上电 → 醒来 → 等「你好 / 点头 / 看我 / 关灯 / 音乐」。不要同时再手动开一份 `--listen`。
+
+日志：`journalctl -u lelamp-local -f`
 
 ---
 

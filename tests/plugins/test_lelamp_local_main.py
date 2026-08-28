@@ -246,6 +246,54 @@ def test_main_sim_scripted_session(monkeypatch, capsys):
     assert "music 文件夹" in out
 
 
+def test_boot_service_unit_wakes_and_listens(tmp_path):
+    from plugins.lelamp import local_main
+
+    unit = tmp_path / "lelamp-local.service"
+    dest = local_main.install_boot_service(
+        runtime_dir=tmp_path / "runtime",
+        unit_path=unit,
+        enable=False,
+    )
+    text = dest.read_text(encoding="utf-8")
+    assert dest == unit
+    assert "--listen" in text
+    assert "WantedBy=multi-user.target" in text
+    assert "LELAMP_LISTEN=1" in text
+    assert "wake" in text.lower() or "Chinese" in text
+    copied = tmp_path / "runtime" / "local_main.py"
+    assert copied.is_file()
+    assert 'WATCH_REVISION = "2026-08-28-follow"' in copied.read_text(encoding="utf-8")
+
+
+def test_lelamp_listen_env_skips_repl(monkeypatch):
+    from plugins.lelamp import local_main
+
+    seen = {}
+
+    def fake_listen(lamp, *, device, model_path):
+        seen["listen"] = True
+        return 0
+
+    monkeypatch.setenv("LELAMP_LISTEN", "1")
+    monkeypatch.setattr(local_main, "run_listen_loop", fake_listen)
+    assert local_main.main(["--sim", "--no-wake"]) == 0
+    assert seen.get("listen") is True
+
+
+def test_repl_flag_overrides_listen_env(monkeypatch):
+    from plugins.lelamp import local_main
+
+    monkeypatch.setenv("LELAMP_LISTEN", "1")
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "q")
+    monkeypatch.setattr(
+        local_main,
+        "run_listen_loop",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not listen")),
+    )
+    assert local_main.main(["--sim", "--no-wake", "--repl"]) == 0
+
+
 def test_extract_spoken_command_from_padded_asr():
     assert extract_spoken_command("请关灯") == "关灯"
     assert extract_spoken_command("你 好 呀") == "你好"
