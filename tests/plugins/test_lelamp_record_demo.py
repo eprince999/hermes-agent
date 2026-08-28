@@ -2,28 +2,31 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 RECORD = ROOT / "lelamp_il" / "record_demo.py"
 WRAPPER = ROOT / "lelamp_il" / "record_on_lamp.sh"
+REVISION = "2026-08-28-stream"
 
 
 def _il_path() -> str:
     return str(ROOT / "lelamp_il")
 
 
-def test_revision_fingerprint_is_rpicam_not_old_cam():
+def test_revision_fingerprint_is_stream_not_old_cam():
     source = RECORD.read_text(encoding="utf-8")
-    assert 'RECORD_DEMO_REVISION = "2026-08-28-rpicam"' in source
-    assert "rpicam-vid" in source
+    assert f'RECORD_DEMO_REVISION = "{REVISION}"' in source
+    assert "MjpegLiveStream" in source
     assert "不要走 OpenCV" in source
-    # Old silent-hang path: OpenCV /dev/video0 on Pi, or Feetech line with exception class.
     assert "LeLampLeader 不可用:" not in source
     wrapper = WRAPPER.read_text(encoding="utf-8")
-    assert "2026-08-28-rpicam" in wrapper
+    assert REVISION in wrapper
     assert "record_demo.py" in wrapper
 
 
@@ -42,6 +45,57 @@ def test_mjpeg_splitter_extracts_one_frame_and_keeps_rest():
     got2 = take_jpeg_from_buffer(buf)
     assert got2 == leftover + b"more\xff\xd9"
     assert bytes(buf) == b""
+
+
+def test_mjpeg_stream_drains_while_caller_sleeps():
+    """The bug on the lamp: grab() stopped reading during joint I/O / sleep,
+    the pipe filled, then TimeoutError at ~frame 120."""
+    sys.path.insert(0, _il_path())
+    from record_demo import MjpegLiveStream
+
+    rfd, wfd = os.pipe()
+    stream = MjpegLiveStream(rfd, proc=None)
+    jpeg = b"\xff\xd8" + b"FRAME" + b"\xff\xd9"
+    stop_writer = threading.Event()
+
+    def writer() -> None:
+        try:
+            for _ in range(25):
+                if stop_writer.is_set():
+                    break
+                os.write(wfd, jpeg)
+                time.sleep(0.02)
+        except BrokenPipeError:
+            return
+        finally:
+            try:
+                os.close(wfd)
+            except OSError:
+                return
+
+    thread = threading.Thread(target=writer, daemon=True)
+    thread.start()
+    time.sleep(0.35)  # simulate servo read + fps sleep with no grab()
+    got, age = stream.grab_jpeg()
+    assert got == jpeg
+    assert age < 1.0
+    stop_writer.set()
+    stream.stop()
+    try:
+        os.close(rfd)
+    except OSError:
+        pass
+    thread.join(timeout=1.0)
+
+
+def test_write_frame_accepts_jpeg_bytes(tmp_path: Path):
+    sys.path.insert(0, _il_path())
+    from record_demo import write_frame
+
+    jpeg = b"\xff\xd8" + b"tiny" + b"\xff\xd9"
+    dest = tmp_path / "000000.jpg"
+    write_frame(dest, jpeg)
+    assert dest.read_bytes() == jpeg
 
 
 def test_dummy_record_prints_revision_first(tmp_path: Path):
@@ -68,10 +122,11 @@ def test_dummy_record_prints_revision_first(tmp_path: Path):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     first = result.stdout.splitlines()[0]
-    assert first.startswith("record_demo 2026-08-28-rpicam"), first
+    assert first.startswith(f"record_demo {REVISION}"), first
     assert "file " in result.stdout.splitlines()[1]
     frames = list((data_root / "look_at_person" / "ep_000" / "rgb").glob("*.jpg"))
     assert len(frames) >= 2
+    assert (data_root / "look_at_person" / "ep_000" / "joints.csv").is_file()
 
 
 def test_rpicam_commands_empty_when_binaries_missing(monkeypatch):

@@ -3,7 +3,7 @@
 # Old copies hang silently at "步骤 2/4" on Camera Module 3.
 set -euo pipefail
 
-REV="2026-08-28-rpicam"
+REV="2026-08-28-stream"
 SCRIPT="$(cd "$(dirname "$0")" && pwd)/record_demo.py"
 
 if [[ ! -f "$SCRIPT" ]]; then

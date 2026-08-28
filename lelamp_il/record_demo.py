@@ -25,8 +25,8 @@ from __future__ import annotations
 
 import argparse
 import csv
-import io
 import math
+import os
 import select
 import shutil
 import subprocess
@@ -52,7 +52,7 @@ from feetech_bus import (
 # Bump when camera/servo recording logic changes. Printed as the first
 # line of main(). If the lamp does not print this, git pull did not land
 # — do not copy this file into ~/lelamp_runtime/.
-RECORD_DEMO_REVISION = "2026-08-28-rpicam"
+RECORD_DEMO_REVISION = "2026-08-28-stream"
 
 add_runtime_site_packages()
 
@@ -122,7 +122,7 @@ class JointSource:
 
 class CameraSource:
     def connect(self) -> str: ...
-    def grab(self) -> Image.Image: ...
+    def grab(self) -> Image.Image | bytes: ...
     def close(self) -> None: ...
 
 
@@ -320,6 +320,138 @@ def take_jpeg_from_buffer(buf: bytearray) -> bytes | None:
     return jpeg
 
 
+def _enlarge_pipe(fd: int) -> None:
+    """Give rpicam-vid more than the default 64KiB pipe so a slow grab cannot stall it."""
+    try:
+        import fcntl
+
+        flag = getattr(fcntl, "F_SETPIPE_SZ", 1031)
+        fcntl.fcntl(fd, flag, 1 << 20)
+    except Exception:
+        return
+
+
+def write_frame(path: Path, frame: Image.Image | bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(frame, (bytes, bytearray)):
+        path.write_bytes(bytes(frame))
+        return
+    frame.convert("RGB").save(path, quality=90)
+
+
+class MjpegLiveStream:
+    """Drain rpicam-vid stdout on a side thread; keep only the latest JPEG.
+
+    The record loop also talks to servos and sleeps to hit --fps. If it is
+    the only stdout reader, the 64KiB pipe fills, libcamera stalls, and
+    grab() raises TimeoutError mid-episode.
+    """
+
+    def __init__(self, fd: int, proc: subprocess.Popen | None = None) -> None:
+        self._fd = fd
+        self._proc = proc
+        self._buf = bytearray()
+        self._lock = threading.Lock()
+        self._latest: bytes | None = None
+        self._latest_ts = 0.0
+        self._error: BaseException | None = None
+        self._stop = threading.Event()
+        self._got_one = threading.Event()
+        _enlarge_pipe(fd)
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="mjpeg-drain"
+        )
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            while not self._stop.is_set():
+                if self._proc is not None and self._proc.poll() is not None:
+                    ready, _, _ = select.select([self._fd], [], [], 0)
+                    if not ready:
+                        with self._lock:
+                            if self._latest is None and self._error is None:
+                                self._error = RuntimeError(
+                                    f"rpicam-vid 退出码 {self._proc.returncode}"
+                                )
+                        self._got_one.set()
+                        return
+                try:
+                    ready, _, _ = select.select([self._fd], [], [], 0.25)
+                except (ValueError, OSError):
+                    return
+                if not ready:
+                    continue
+                try:
+                    chunk = os.read(self._fd, 65536)
+                except OSError:
+                    return
+                if not chunk:
+                    if self._proc is not None and self._proc.poll() is not None:
+                        return
+                    time.sleep(0.02)
+                    continue
+                self._buf.extend(chunk)
+                while True:
+                    jpeg = take_jpeg_from_buffer(self._buf)
+                    if jpeg is None:
+                        break
+                    with self._lock:
+                        self._latest = jpeg
+                        self._latest_ts = time.monotonic()
+                    self._got_one.set()
+        except BaseException as exc:
+            with self._lock:
+                self._error = exc
+            self._got_one.set()
+
+    def _raise_if_dead(self) -> None:
+        with self._lock:
+            err = self._error
+        if err is not None:
+            raise err
+
+    def wait_first(self, timeout_s: float, progress: bool = False) -> bytes:
+        deadline = time.monotonic() + timeout_s
+        last_nudge = 0.0
+        while time.monotonic() < deadline:
+            self._raise_if_dead()
+            remaining = deadline - time.monotonic()
+            if self._got_one.wait(min(0.25, max(remaining, 0.0))):
+                jpeg = self.latest_bytes()
+                if jpeg:
+                    return jpeg
+            if progress:
+                waited = timeout_s - (deadline - time.monotonic())
+                if waited - last_nudge >= 2.0:
+                    last_nudge = waited
+                    print(f"    rpicam-vid: 等待第一帧 {waited:.0f}s ...", flush=True)
+        self._raise_if_dead()
+        raise TimeoutError(f"{timeout_s:.0f}s 内没有收到 JPEG 帧")
+
+    def latest_bytes(self) -> bytes | None:
+        with self._lock:
+            return self._latest
+
+    def latest_age(self) -> float:
+        with self._lock:
+            if self._latest is None or self._latest_ts <= 0:
+                return float("inf")
+            return time.monotonic() - self._latest_ts
+
+    def grab_jpeg(self) -> tuple[bytes, float]:
+        """Return (jpeg, age_seconds). Never blocks on the pipe itself."""
+        self._raise_if_dead()
+        jpeg = self.latest_bytes()
+        if jpeg is None:
+            jpeg = self.wait_first(5.0)
+        return jpeg, self.latest_age()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=1.5)
+
+
 def _picamera_capture(cam, timeout_s: float = 8.0):
     try:
         return cam.capture_array("main", wait=timeout_s)
@@ -350,7 +482,7 @@ def _fmt_joints(values: dict[str, float]) -> str:
     return " ".join(parts)
 
 
-def _rpicam_commands(width: int, height: int) -> list[list[str]]:
+def _rpicam_commands(width: int, height: int, fps: int = 15) -> list[list[str]]:
     bins = []
     for name in ("rpicam-vid", "libcamera-vid"):
         if shutil.which(name):
@@ -368,11 +500,12 @@ def _rpicam_commands(width: int, height: int) -> list[list[str]]:
             "--height",
             str(height),
             "--framerate",
-            "30",
+            str(fps),
             "--nopreview",
             "-o",
             "-",
         ]
+        cmds.append(sized + ["--flush", "--denoise", "cdn_off"])
         cmds.append(sized + ["--flush"])
         cmds.append(list(sized))
         cmds.append(
@@ -383,6 +516,7 @@ def _rpicam_commands(width: int, height: int) -> list[list[str]]:
                 "--codec",
                 "mjpeg",
                 "--nopreview",
+                "--flush",
                 "-o",
                 "-",
             ]
@@ -397,8 +531,9 @@ class PiOrWebcam(CameraSource):
         self.height = height
         self._kind = None
         self._handle = None
-        self._mjpeg_buf = bytearray()
+        self._mjpeg: MjpegLiveStream | None = None
         self._stderr: deque[str] = deque(maxlen=40)
+        self._stale_warns = 0
 
     def connect(self) -> str:
         errors: list[str] = []
@@ -459,44 +594,55 @@ class PiOrWebcam(CameraSource):
         raise RuntimeError("没有摄像头可用。\n  - " + "\n  - ".join(errors))
 
     def _connect_rpicam(self) -> str:
-        width = 640 if self.width <= 640 else self.width
-        height = 480 if self.height <= 480 else self.height
-        cmds = _rpicam_commands(width, height)
-        if not cmds:
-            raise RuntimeError("找不到 rpicam-vid / libcamera-vid")
+        sizes = []
+        for pair in ((self.width, self.height), (320, 240), (640, 480)):
+            if pair not in sizes:
+                sizes.append(pair)
         last_err = "no command tried"
-        for cmd in cmds:
-            print(f"    rpicam-vid: 尝试 {' '.join(cmd)}", flush=True)
-            try:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    bufsize=0,
+        for width, height in sizes:
+            cmds = _rpicam_commands(width, height, fps=15)
+            if not cmds:
+                raise RuntimeError("找不到 rpicam-vid / libcamera-vid")
+            for cmd in cmds:
+                print(f"    rpicam-vid: 尝试 {' '.join(cmd)}", flush=True)
+                try:
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        bufsize=0,
+                    )
+                except FileNotFoundError as exc:
+                    last_err = str(exc)
+                    continue
+                if proc.stdout is None:
+                    last_err = "rpicam-vid 没有 stdout"
+                    self._stop_rpicam_proc(proc)
+                    continue
+                self._handle = proc
+                self._stderr.clear()
+                threading.Thread(
+                    target=self._drain_rpicam_stderr,
+                    args=(proc,),
+                    daemon=True,
+                ).start()
+                stream = MjpegLiveStream(proc.stdout.fileno(), proc)
+                self._mjpeg = stream
+                try:
+                    stream.wait_first(timeout_s=10.0, progress=True)
+                except Exception as exc:
+                    last_err = str(exc)
+                    err_tail = " | ".join(list(self._stderr)[-6:])
+                    if err_tail:
+                        last_err = f"{last_err}; stderr: {err_tail}"
+                    print(f"    rpicam-vid: 失败: {last_err}", flush=True)
+                    self._stop_rpicam()
+                    continue
+                self._kind = "rpicam-vid"
+                return (
+                    f"Pi Camera via {cmd[0]} (MJPEG {width}x{height} @ 15fps, "
+                    "后台抽帧)"
                 )
-            except FileNotFoundError as exc:
-                last_err = str(exc)
-                continue
-            self._handle = proc
-            self._mjpeg_buf = bytearray()
-            self._stderr.clear()
-            threading.Thread(
-                target=self._drain_rpicam_stderr,
-                args=(proc,),
-                daemon=True,
-            ).start()
-            try:
-                _ = self._read_jpeg(timeout_s=10.0, progress=True)
-            except Exception as exc:
-                last_err = str(exc)
-                err_tail = " | ".join(list(self._stderr)[-6:])
-                if err_tail:
-                    last_err = f"{last_err}; stderr: {err_tail}"
-                print(f"    rpicam-vid: 失败: {last_err}", flush=True)
-                self._stop_rpicam()
-                continue
-            self._kind = "rpicam-vid"
-            return f"Pi Camera via {cmd[0]} (MJPEG {width}x{height})"
         raise RuntimeError(last_err)
 
     def _drain_rpicam_stderr(self, proc: subprocess.Popen) -> None:
@@ -510,40 +656,7 @@ class PiOrWebcam(CameraSource):
         except Exception:
             return
 
-    def _read_jpeg(self, timeout_s: float, progress: bool = False) -> bytes:
-        proc = self._handle
-        if proc is None or proc.stdout is None:
-            raise RuntimeError("rpicam-vid 没有 stdout")
-        deadline = time.monotonic() + timeout_s
-        last_nudge = 0.0
-        while time.monotonic() < deadline:
-            if progress:
-                waited = timeout_s - (deadline - time.monotonic())
-                if waited - last_nudge >= 2.0:
-                    last_nudge = waited
-                    print(f"    rpicam-vid: 等待第一帧 {waited:.0f}s ...", flush=True)
-            if proc.poll() is not None:
-                err_tail = " | ".join(list(self._stderr)[-8:]) or "no stderr"
-                raise RuntimeError(
-                    f"rpicam-vid 退出码 {proc.returncode}: {err_tail}"
-                )
-            ready, _, _ = select.select([proc.stdout], [], [], 0.25)
-            if not ready:
-                continue
-            chunk = proc.stdout.read(4096)
-            if not chunk:
-                continue
-            self._mjpeg_buf.extend(chunk)
-            jpeg = take_jpeg_from_buffer(self._mjpeg_buf)
-            if jpeg:
-                return jpeg
-        raise TimeoutError(f"{timeout_s:.0f}s 内没有收到 JPEG 帧")
-
-    def _stop_rpicam(self) -> None:
-        proc = self._handle
-        self._handle = None
-        if proc is None:
-            return
+    def _stop_rpicam_proc(self, proc: subprocess.Popen) -> None:
         try:
             proc.terminate()
             proc.wait(timeout=2)
@@ -552,6 +665,15 @@ class PiOrWebcam(CameraSource):
                 proc.kill()
             except Exception:
                 pass
+
+    def _stop_rpicam(self) -> None:
+        if self._mjpeg is not None:
+            self._mjpeg.stop()
+            self._mjpeg = None
+        proc = self._handle
+        self._handle = None
+        if proc is not None:
+            self._stop_rpicam_proc(proc)
 
     def _connect_picamera2(self) -> str:
         print("    picamera2: 准备 import（这一步卡住请 Ctrl-C，改用 rpicam-vid）...", flush=True)
@@ -571,9 +693,9 @@ class PiOrWebcam(CameraSource):
         cam = Picamera2()
         stuck.set()
         config_tries = [
-            {"size": (640, 480), "format": "XBGR8888"},
             {"size": (self.width, self.height), "format": "XBGR8888"},
-            {"size": (640, 480)},
+            {"size": (320, 240), "format": "XBGR8888"},
+            {"size": (640, 480), "format": "XBGR8888"},
             {"size": (self.width, self.height)},
         ]
         last_exc: Exception | None = None
@@ -598,13 +720,28 @@ class PiOrWebcam(CameraSource):
                 _stop_picamera(cam)
         raise RuntimeError(f"picamera2: {last_exc}")
 
-    def grab(self) -> Image.Image:
+    def grab(self) -> Image.Image | bytes:
         if self._kind == "rpicam-vid":
-            jpeg = self._read_jpeg(timeout_s=2.0)
-            return Image.open(io.BytesIO(jpeg)).convert("RGB")
+            if self._mjpeg is None:
+                raise RuntimeError("rpicam-vid 流未打开")
+            jpeg, age = self._mjpeg.grab_jpeg()
+            if age > 0.8:
+                self._stale_warns += 1
+                if self._stale_warns == 1 or self._stale_warns % 30 == 0:
+                    print(
+                        f"    警告: 相机帧偏旧 {age:.1f}s，复用最新一张 "
+                        f"(连续 {self._stale_warns})",
+                        flush=True,
+                    )
+            else:
+                self._stale_warns = 0
+            return jpeg
         if self._kind == "picamera2":
             arr = _picamera_capture(self._handle, timeout_s=2.0)
-            return Image.fromarray(arr).convert("RGB")
+            img = Image.fromarray(arr).convert("RGB")
+            if img.size[0] > 320 or img.size[1] > 240:
+                img.thumbnail((320, 240))
+            return img
         ok, frame = self._handle.read()
         if not ok:
             raise RuntimeError("摄像头丢帧")
@@ -662,24 +799,20 @@ def prompt(message: str, default: str = "") -> str:
     return got or default
 
 
-def save_episode(
+def save_joints_csv(
     ep_dir: Path,
     timestamps: list[float],
     joints_rows: list[dict[str, float]],
-    frames: list[Image.Image],
 ) -> None:
-    rgb_dir = ep_dir / "rgb"
-    rgb_dir.mkdir(parents=True, exist_ok=True)
     csv_path = ep_dir / "joints.csv"
     with csv_path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
         writer.writeheader()
-        for i, (ts, joints) in enumerate(zip(timestamps, joints_rows)):
+        for ts, joints in zip(timestamps, joints_rows):
             row = {"timestamp": f"{ts:.6f}"}
             for name in JOINT_NAMES:
                 row[f"{name}.pos"] = f"{joints[name]:.4f}"
             writer.writerow(row)
-            frames[i].convert("RGB").save(rgb_dir / f"{i:06d}.jpg", quality=90)
 
 
 def record_one(
@@ -687,20 +820,21 @@ def record_one(
     camera: CameraSource,
     seconds: float,
     fps: int,
-) -> tuple[list[float], list[dict[str, float]], list[Image.Image]]:
+    rgb_dir: Path,
+) -> tuple[list[float], list[dict[str, float]]]:
     n_target = max(1, int(round(seconds * fps)))
     period = 1.0 / fps
     t0 = time.perf_counter()
     timestamps: list[float] = []
     rows: list[dict[str, float]] = []
-    frames: list[Image.Image] = []
+    rgb_dir.mkdir(parents=True, exist_ok=True)
     for i in range(n_target):
         tick = time.perf_counter()
         pose = joints.read()
         frame = camera.grab()
+        write_frame(rgb_dir / f"{i:06d}.jpg", frame)
         timestamps.append(tick - t0)
         rows.append(pose)
-        frames.append(frame)
         if i == 0 or (i + 1) % fps == 0 or i + 1 == n_target:
             print(
                 f"    {i + 1:>4}/{n_target}  {_fmt_joints(pose)}",
@@ -709,7 +843,7 @@ def record_one(
         remain = period - (time.perf_counter() - tick)
         if remain > 0:
             time.sleep(remain)
-    return timestamps, rows, frames
+    return timestamps, rows
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -807,25 +941,40 @@ def main(argv: list[str] | None = None) -> int:
                 if args.countdown > 0:
                     countdown(args.countdown)
             print(f"   >> 开始录 {args.seconds} 秒，现在用手把灯转向目标")
+            ep_dir = task_dir / ep_name
+            if ep_dir.exists():
+                ep_dir = task_dir / f"ep_{next_episode_index(task_dir):03d}"
+                ep_name = ep_dir.name
+            ep_dir.mkdir(parents=True, exist_ok=True)
             try:
-                ts, rows, frames = record_one(
-                    joint_src, cam_src, seconds=args.seconds, fps=args.fps
+                ts, rows = record_one(
+                    joint_src,
+                    cam_src,
+                    seconds=args.seconds,
+                    fps=args.fps,
+                    rgb_dir=ep_dir / "rgb",
                 )
             except KeyboardInterrupt:
+                shutil.rmtree(ep_dir, ignore_errors=True)
                 print("\n   本段中断，未保存。")
                 if args.no_prompt:
                     break
                 if prompt("   继续下一段? [Y/n]", default="Y").lower().startswith("n"):
                     break
                 continue
+            except Exception as exc:
+                n_partial = len(list((ep_dir / "rgb").glob("*.jpg"))) if (ep_dir / "rgb").exists() else 0
+                print(f"\n   本段失败: {exc}  (已落盘 {n_partial} 张图)")
+                if n_partial == 0:
+                    shutil.rmtree(ep_dir, ignore_errors=True)
+                if args.no_prompt:
+                    raise
+                if prompt("   继续下一段? [Y/n]", default="Y").lower().startswith("n"):
+                    break
+                continue
 
-            ep_dir = task_dir / ep_name
-            if ep_dir.exists():
-                # should not happen with next_episode_index, but be safe
-                ep_dir = task_dir / f"ep_{next_episode_index(task_dir):03d}"
-                ep_name = ep_dir.name
-            save_episode(ep_dir, ts, rows, frames)
-            n = len(frames)
+            save_joints_csv(ep_dir, ts, rows)
+            n = len(rows)
             print(f"   已写入 {ep_dir}  ({n} 帧关节 + {n} 张图)")
 
             if args.no_prompt:

@@ -61,7 +61,7 @@ cd ~/hermes-agent/lelamp_il
 bash enable_pi_camera.sh
 ```
 
-启动时**第一行**必须是 `record_demo 2026-08-28-rpicam`。没有这一行就还是旧文件（旧文件步骤 2 会无输出卡住）：
+启动时**第一行**必须是 `record_demo 2026-08-28-stream`。没有这一行就还是旧文件：
 
 ```bash
 # 先 Ctrl-C 掉卡住的旧进程
@@ -74,13 +74,13 @@ git pull origin cursor/lelamp-zero2w-train-36b0
 git reset --hard origin/cursor/lelamp-zero2w-train-36b0
 
 grep RECORD_DEMO_REVISION lelamp_il/record_demo.py
-# 必须看到 2026-08-28-rpicam
+# 必须看到 2026-08-28-stream
 
 # 不要复制脚本，不要 cd 到 ~/lelamp_runtime 后跑 python record_demo.py
 bash ~/hermes-agent/lelamp_il/record_on_lamp.sh
 ```
 
-步骤 2 必须立刻打印 `rpicam-vid: 尝试 ...`。若仍然完全没字，跑的不是这份文件。
+步骤 2 必须立刻打印 `rpicam-vid: 尝试 ...`。录的时候关节数字会变，6 秒内应打到 `180/180`，不能再在中途 `TimeoutError`。
 
 ---
 
