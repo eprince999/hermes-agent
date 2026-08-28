@@ -42,6 +42,7 @@ def test_agent_hook_follows_until_stop_not_fixed_six_seconds():
     assert "stop_event" in source
     assert "close_camera" in source
     assert "seconds: float = 0.0" in source
+    assert 'WATCH_REVISION = "2026-08-28-follow"' in source
     assert "n_steps = max(1, int(round(seconds * control_hz)))" not in source
     local = (
         Path(__file__).resolve().parents[2] / "plugins" / "lelamp" / "local_main.py"
@@ -49,6 +50,7 @@ def test_agent_hook_follows_until_stop_not_fixed_six_seconds():
     assert "Command(\"watch_person\", 6.0" not in local
     assert "一直看着你" in local
     assert "WATCH_STOP_SHORT" in local
+    assert 'WATCH_REVISION = "2026-08-28-follow"' in local
 
 
 def test_infer_motor_bus_does_not_require_lerobot_calibration():

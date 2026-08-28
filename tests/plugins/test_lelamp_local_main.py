@@ -64,6 +64,48 @@ def test_watch_me_is_not_scanning_or_nod():
     assert parse_line(spoken).kind == "watch_person"
 
 
+def test_import_run_watch_person_skips_six_second_hook(tmp_path, monkeypatch):
+    from plugins.lelamp import local_main
+
+    old = tmp_path / "old"
+    new = tmp_path / "new"
+    old.mkdir()
+    new.mkdir()
+    (old / "agent_hook.py").write_text(
+        "def run_watch_person(model, meta, port, seconds=6.0):\n    return 'old'\n",
+        encoding="utf-8",
+    )
+    (new / "agent_hook.py").write_text(
+        "WATCH_REVISION = 'new'\n"
+        "def run_watch_person(model, meta, port, seconds=0.0, stop_event=None):\n"
+        "    return 'new'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(local_main, "resolve_look_at_artifacts", lambda: (old, None, None))
+    monkeypatch.setattr(local_main, "look_at_search_roots", lambda: [new])
+    fn = local_main._import_run_watch_person()
+    assert fn(None, None, None) == "new"
+
+
+def test_import_run_watch_person_errors_if_only_six_second_hook(tmp_path, monkeypatch):
+    from plugins.lelamp import local_main
+
+    old = tmp_path / "old"
+    old.mkdir()
+    (old / "agent_hook.py").write_text(
+        "def run_watch_person(model, meta, port, seconds=6.0):\n    return 'old'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(local_main, "resolve_look_at_artifacts", lambda: (old, None, None))
+    monkeypatch.setattr(local_main, "look_at_search_roots", lambda: [])
+    try:
+        local_main._import_run_watch_person()
+    except ImportError as exc:
+        assert "6 秒" in str(exc)
+    else:
+        raise AssertionError("expected ImportError for old 6-second hook")
+
+
 def test_look_at_search_roots_follow_sudo_user(tmp_path, monkeypatch):
     from plugins.lelamp import local_main
 

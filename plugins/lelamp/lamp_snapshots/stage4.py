@@ -40,6 +40,8 @@ Roadmap:
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import inspect
 import json
 import os
 import pwd
@@ -62,6 +64,8 @@ from urllib.request import urlretrieve
 # Bump when a stage lands. Printed at startup so a snapshot is identifiable.
 AGENT_STAGE = 4
 AGENT_LABEL = "vosk listen + music folder + look-at"
+# If the lamp prints「已看向画面中的人（6.0 秒）」it is still the old runtime copy.
+WATCH_REVISION = "2026-08-28-follow"
 
 
 def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = None) -> Path:
@@ -1629,22 +1633,42 @@ def resolve_look_at_artifacts() -> Tuple[Optional[Path], Optional[Path], Optiona
 
 
 def _import_run_watch_person():
-    """Load lelamp_il.agent_hook without importing onnxruntime at module import."""
+    """Load lelamp_il.agent_hook without importing onnxruntime at module import.
+
+    Skip copies that still use the old 6-second signature (no stop_event).
+    Load by file path so a stale ``import agent_hook`` cannot win.
+    """
     candidates = []
     il_dir, _, _ = resolve_look_at_artifacts()
     if il_dir is not None:
         candidates.append(il_dir)
     candidates.extend(look_at_search_roots())
+    seen = set()
+    last_old = None
     for folder in candidates:
-        hook = folder / "agent_hook.py"
-        if not hook.is_file():
+        hook = (folder / "agent_hook.py").resolve()
+        if not hook.is_file() or hook in seen:
             continue
-        path = str(folder)
-        if path not in sys.path:
-            sys.path.insert(0, path)
-        from agent_hook import run_watch_person
-
-        return run_watch_person
+        seen.add(hook)
+        mod_name = f"lelamp_agent_hook_{abs(hash(str(hook)))}"
+        spec = importlib.util.spec_from_file_location(mod_name, hook)
+        if spec is None or spec.loader is None:
+            continue
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        fn = getattr(mod, "run_watch_person", None)
+        if not callable(fn):
+            continue
+        if "stop_event" not in inspect.signature(fn).parameters:
+            last_old = hook
+            print(f"跳过旧 6 秒 agent_hook: {hook}", flush=True)
+            continue
+        print(f"watch hook {hook}  {getattr(mod, 'WATCH_REVISION', '?')}", flush=True)
+        return fn
+    if last_old is not None:
+        raise ImportError(
+            f"{last_old} 还是 6 秒旧版。请覆盖 ~/hermes-agent/lelamp_il/agent_hook.py"
+        )
     raise ImportError("找不到 lelamp_il/agent_hook.py")
 
 
@@ -2028,6 +2052,10 @@ class LocalLamp:
             print("若用 sudo 启动，可先: sudo LELAMP_IL_DIR=/home/spocklamp/hermes-agent/lelamp_il \\")
             print("  uv run python local_main.py --listen")
             return "看人策略还没拷到灯上。"
+        print(
+            f"look-at {WATCH_REVISION}  until stop  file={Path(__file__).resolve()}",
+            flush=True,
+        )
         self._release_motors()
         self._watch_thread = threading.Thread(
             target=self._watch_loop,
@@ -2129,6 +2157,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         snapshot_current(args.snapshot)
         return 0
     print(f"local_main  stage {AGENT_STAGE}  ({AGENT_LABEL})")
+    print(
+        f"look-at {WATCH_REVISION}  {Path(__file__).resolve()}  "
+        "（看我会一直跟；若结束打印「6.0 秒」=还在跑旧脚本）"
+    )
     if args.bt_connect:
         connected = connect_bluetooth_speaker(args.bt_mac)
         return 0 if connected else 1

@@ -21,6 +21,9 @@ _ROOT = Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+# Printed when 「看我」 starts. If the lamp still says「6.0 秒」, this file was not copied.
+WATCH_REVISION = "2026-08-28-follow"
+
 WATCH_PERSON_PROMPT = """
 看人（视觉策略，不是播放动画）：
 用户说「看我」「看着我」「看这边」「看过来」「look at me」「watch me」时，
@@ -79,6 +82,11 @@ def run_watch_person(
     bounded = seconds is not None and float(seconds) > 0
     n_steps = max(1, int(round(float(seconds) * control_hz))) if bounded else None
 
+    print(
+        f"watch_person {WATCH_REVISION}  until_stop={not bounded}  "
+        f"file={Path(__file__).resolve()}",
+        flush=True,
+    )
     sess = make_session(model)
     camera = open_camera(camera_index)
     bus = MotorBus(port, names)
