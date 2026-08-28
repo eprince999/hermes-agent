@@ -12,9 +12,10 @@ Snapshot 3 is the music-folder archive. This file is snapshot 4::
     sudo uv run python local_main.py --boot-status
 
 ``--install-service`` writes systemd unit ``lelamp-local``: on boot the
-lamp wakes (wake_up) and waits for Chinese voice commands. Official
-``main.py`` / ``lelamp.service`` stay untouched; that unit is disabled
-so it does not grab the serial port.
+lamp runs this file, plays wake_up in the dark, fades 0→80% in the last
+1.5s, then waits for Chinese voice commands. Official ``main.py`` /
+``lelamp.service`` stay untouched; that unit is disabled so it does not
+grab the serial port.
 
 Keep official ``main.py`` untouched. From the runtime repo root:
 
@@ -411,7 +412,7 @@ def install_boot_service(
     status_proc = _systemctl_run(systemctl, ["status", BOOT_SERVICE_NAME, "--no-pager", "-l"])
     active_proc = _systemctl_run(systemctl, ["is-active", BOOT_SERVICE_NAME])
     active = (active_proc.stdout or "").strip()
-    print(f"已开机自启 {BOOT_SERVICE_NAME}（{BOOT_REVISION}）。上电会闪一下再醒来。")
+    print(f"已开机自启 {BOOT_SERVICE_NAME}（{BOOT_REVISION}）。上电跑 local_main：全黑做 wake_up，最后 1.5 秒渐亮到 80%。")
     print(f"日志: journalctl -u {BOOT_SERVICE_NAME} -b --no-pager")
     if enable_proc.returncode != 0 or restart_proc.returncode != 0 or active != "active":
         print("服务现在没有 active。把上面的 status 整段发过来。", flush=True)
@@ -2114,7 +2115,11 @@ class LocalLamp:
             print("[sim] skip motors/rgb connect", flush=True)
             return
         self._try_start_rgb()
-        self._alive_flash()
+        # Stay black until wake() fades in the last 1.5s of wake_up.
+        if self.rgb is not None:
+            mood, _circadian = circadian_mood()
+            self.brightness = 0
+            self._apply_rgb(MOOD_RGB[mood])
         self._try_start_motors()
         if self.rgb is None and self.motors is None:
             raise RuntimeError(f"RGB 和舵机都没起来（口 {self.port}）")
@@ -2143,22 +2148,6 @@ class LocalLamp:
                 time.sleep(1.0)
         print(f"RGB 暂时不可用: {last_exc}", flush=True)
         self.rgb = None
-
-    def _alive_flash(self) -> None:
-        """Brief glow so a cold boot is visibly alive before the wake blackout."""
-        if self.sim or self.rgb is None:
-            return
-        try:
-            mood, _circadian = circadian_mood()
-            saved = int(self.brightness)
-            self.brightness = 55
-            self._apply_rgb(MOOD_RGB[mood])
-            time.sleep(0.45)
-            self.brightness = 0
-            self._apply_rgb(MOOD_RGB[mood])
-            self.brightness = saved
-        except Exception as exc:
-            print(f"开机闪灯失败: {exc}", flush=True)
 
     def _try_start_motors(self) -> None:
         from lelamp.service.motors.motors_service import MotorsService
@@ -2588,12 +2577,12 @@ class LocalLamp:
             time.sleep(dt)
 
     def wake(self) -> None:
+        """Play wake_up in the dark, then fade 0→80% over the last 1.5s."""
         mood, _circadian = circadian_mood()
         self.brightness = 0
         self._apply_rgb(MOOD_RGB[mood])
         self._play("wake_up")
-        # No motors → no wake_up motion; fade immediately so reboot still looks alive.
-        if not self.sim and self.motors is not None:
+        if not self.sim:
             time.sleep(wake_blackout_seconds(recording_duration_seconds("wake_up")))
         self.fade_brightness(WAKE_BRIGHTNESS)
         print(

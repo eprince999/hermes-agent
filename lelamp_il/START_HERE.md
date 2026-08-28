@@ -213,7 +213,7 @@ sudo LELAMP_IL_DIR=/home/spocklamp/hermes-agent/lelamp_il \
   .venv/bin/python local_main.py --install-service
 ```
 
-这会关掉官方 `lelamp.service`（LiveKit `main.py` 抢串口），启用 `lelamp-local`：上电 → 闪一下 → 醒来 → 等「你好 / 点头 / 看我 / 关灯 / 音乐」。不要同时再手动开一份 `--listen`。
+这会关掉官方 `lelamp.service`（LiveKit `main.py` 抢串口），启用 `lelamp-local`：上电自动跑 `local_main.py` → 全黑播 `wake_up` → 最后 1.5 秒从 0 渐亮到 80% → 等「你好 / 点头 / 看我 / 关灯 / 音乐」。不要同时再手动开一份 `--listen`。
 
 覆盖 `local_main.py` 之后必须再跑一次 `--install-service`（或 `install_on_lamp.sh --boot`），否则 systemd 仍是旧 unit。上一版 unit 的 `ExecStartPre` 含 `$()`，systemd 会当成变量，**根本不启动 Python**。
 
