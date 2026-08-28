@@ -14,10 +14,10 @@ Snapshot 3 is the music-folder archive. This file is snapshot 4::
     sudo uv run python local_main.py --check-motors --wiggle
 
 ``--install-service`` writes systemd unit ``lelamp-local``: on boot the
-lamp runs this file, waits for the servos (torque left on), fades
-0→80% from the start, then plays wake_up and waits for Chinese voice
-commands. Official ``main.py`` / ``lelamp.service`` stay untouched;
-that unit is disabled so it does not grab the serial port.
+lamp runs this file, fades the RGB ring first (no serial), then opens
+the servo bus and plays wake_up. Official ``main.py`` /
+``lelamp.service`` stay untouched; that unit is disabled so it does not
+grab the serial port.
 
 Keep official ``main.py`` untouched. From the runtime repo root:
 
@@ -414,7 +414,7 @@ def install_boot_service(
     status_proc = _systemctl_run(systemctl, ["status", BOOT_SERVICE_NAME, "--no-pager", "-l"])
     active_proc = _systemctl_run(systemctl, ["is-active", BOOT_SERVICE_NAME])
     active = (active_proc.stdout or "").strip()
-    print(f"已开机自启 {BOOT_SERVICE_NAME}（{BOOT_REVISION}）。上电跑 local_main：等舵机 → 灯先渐亮 → 再 wake_up。")
+    print(f"已开机自启 {BOOT_SERVICE_NAME}（{BOOT_REVISION}）。上电先亮灯，再连舵机做 wake_up。")
     print(f"日志: journalctl -u {BOOT_SERVICE_NAME} -b --no-pager")
     if enable_proc.returncode != 0 or restart_proc.returncode != 0 or active != "active":
         print("服务现在没有 active。把上面的 status 整段发过来。", flush=True)
@@ -2215,18 +2215,26 @@ class LocalLamp:
         if self.sim:
             print("[sim] skip motors/rgb connect", flush=True)
             return
+        # RGB does not use /dev/ttyACM0 — light up before claiming the bus.
         self._try_start_rgb()
-        # Black until wake() fades in from the start, then plays wake_up.
         if self.rgb is not None:
             mood, _circadian = circadian_mood()
             self.brightness = 0
             self._apply_rgb(MOOD_RGB[mood])
+        if self.rgb is None:
+            print("RGB 没起来，稍后再连舵机", flush=True)
+
+    def _ensure_motors(self) -> None:
+        """Open the Feetech bus after lights are on. Never disable torque."""
+        if self.sim or self.motors is not None:
+            return
         self._try_start_motors()
-        if not self.sim and self.motors is not None:
-            print(f"舵机已连接，等待 {SERVO_SETTLE_SECONDS:.1f}s（不关力矩）…", flush=True)
+        if self.motors is not None:
+            print(
+                f"舵机已连接，等待 {SERVO_SETTLE_SECONDS:.1f}s（不关力矩）…",
+                flush=True,
+            )
             time.sleep(SERVO_SETTLE_SECONDS)
-        if self.rgb is None and self.motors is None:
-            raise RuntimeError(f"RGB 和舵机都没起来（口 {self.port}）")
 
     def _try_start_rgb(self) -> None:
         from lelamp.service.rgb.rgb_service import RGBService
@@ -2681,11 +2689,13 @@ class LocalLamp:
             time.sleep(dt)
 
     def wake(self) -> None:
-        """Fade 0→80% from the start, then play wake_up. Never disable torque."""
+        """Fade lights first (no serial), then open servos and play wake_up."""
         mood, _circadian = circadian_mood()
         self.brightness = 0
         self._apply_rgb(MOOD_RGB[mood])
         self.fade_brightness(WAKE_BRIGHTNESS)
+        print("灯已亮。再连舵机做 wake_up（不关力矩）。", flush=True)
+        self._ensure_motors()
         self._play("wake_up")
         if not self.sim and self.motors is not None:
             time.sleep(recording_duration_seconds("wake_up"))
@@ -2807,6 +2817,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     lamp._apply_rgb(lamp.base_rgb)
                 except Exception:
                     pass
+        try:
+            lamp._ensure_motors()
+        except Exception as exc:
+            print(f"舵机稍后可用: {exc}", flush=True)
         for phrase in args.say:
             if apply_speech(lamp, phrase) == "quit":
                 return 0

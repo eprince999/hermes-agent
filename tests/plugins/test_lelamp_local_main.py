@@ -247,6 +247,7 @@ def test_sim_wake_fades_from_black_then_plays_wake_up():
     order: list[str] = []
     orig_fade = lamp.fade_brightness
     orig_play = lamp._play
+    orig_ensure = lamp._ensure_motors
 
     def fade(target, **kwargs):
         order.append("fade")
@@ -256,13 +257,42 @@ def test_sim_wake_fades_from_black_then_plays_wake_up():
         order.append("play")
         return orig_play(recording, **kwargs)
 
+    def ensure():
+        order.append("motors")
+        return orig_ensure()
+
     lamp.fade_brightness = fade  # type: ignore[method-assign]
     lamp._play = play  # type: ignore[method-assign]
+    lamp._ensure_motors = ensure  # type: ignore[method-assign]
     lamp.wake()
-    assert order == ["fade", "play"]
+    assert order == ["fade", "motors", "play"]
     assert lamp.last_expression == "wake_up"
     assert lamp.brightness == WAKE_BRIGHTNESS == 80
     assert lamp.last_rgb == _scale_rgb(lamp.base_rgb, 80)
+
+
+def test_start_does_not_open_servos(monkeypatch):
+    from plugins.lelamp import local_main
+
+    opened = {"motors": 0}
+
+    def fake_rgb(self):
+        self.rgb = None
+
+    def fake_motors(self):
+        opened["motors"] += 1
+
+    monkeypatch.setattr(local_main.LocalLamp, "_try_start_rgb", fake_rgb)
+    monkeypatch.setattr(local_main.LocalLamp, "_try_start_motors", fake_motors)
+    lamp = local_main.LocalLamp(
+        sim=False,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    lamp.start()
+    assert opened["motors"] == 0
 
 
 def test_wake_blackout_covers_all_but_the_tail():
