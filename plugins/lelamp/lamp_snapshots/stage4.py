@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pwd
 import queue
 import random
 import select
@@ -1539,18 +1540,36 @@ def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path)
         stop.set()
 
 
+def _effective_home() -> Path:
+    """Home of the real user, even when launched with sudo uv run."""
+    sudo_user = (os.environ.get("SUDO_USER") or "").strip()
+    if os.geteuid() == 0 and sudo_user and sudo_user != "root":
+        try:
+            return Path(pwd.getpwnam(sudo_user).pw_dir)
+        except KeyError:
+            return Path("/home") / sudo_user
+    return Path.home()
+
+
 def look_at_search_roots() -> List[Path]:
     here = Path(__file__).resolve().parent
+    home = _effective_home()
     roots = [
-        Path.home() / "hermes-agent" / "lelamp_il",
-        here.parents[2] / "lelamp_il",
-        Path.home() / "lelamp_runtime" / "lelamp_il",
+        here,
         here / "lelamp_il",
+        home / "hermes-agent" / "lelamp_il",
+        home / "lelamp_runtime" / "lelamp_il",
+        home / "lelamp_runtime",
+        Path.home() / "hermes-agent" / "lelamp_il",
         Path.home() / "lelamp_runtime",
     ]
+    try:
+        roots.insert(2, here.parents[2] / "lelamp_il")
+    except IndexError:
+        pass
     extra = (os.environ.get("LELAMP_IL_DIR") or "").strip()
     if extra:
-        roots.insert(0, Path(extra))
+        roots.insert(0, Path(extra).expanduser())
     seen: List[Path] = []
     for root in roots:
         if root not in seen:
@@ -1944,7 +1963,11 @@ class LocalLamp:
             return "看着你。"
         _il_dir, model, meta = resolve_look_at_artifacts()
         if model is None or meta is None:
-            print("没有 tiny_lamp_int8.onnx，先在笔记本训练再 scp")
+            looked = "\n".join(f"  {p}" for p in look_at_search_roots())
+            print("没有 tiny_lamp_int8.onnx + meta.json。已搜索:\n" + looked)
+            print("模型应放在 /home/spocklamp/hermes-agent/lelamp_il/artifacts/")
+            print("若用 sudo 启动，可先: sudo LELAMP_IL_DIR=/home/spocklamp/hermes-agent/lelamp_il \\")
+            print("  uv run python local_main.py --listen")
             return "看人策略还没拷到灯上。"
         self._release_motors()
         try:

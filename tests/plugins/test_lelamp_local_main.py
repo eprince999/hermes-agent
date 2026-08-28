@@ -63,6 +63,34 @@ def test_watch_me_is_not_scanning_or_nod():
     assert parse_line(spoken).kind == "watch_person"
 
 
+def test_look_at_search_roots_follow_sudo_user(tmp_path, monkeypatch):
+    from plugins.lelamp import local_main
+
+    class Pw:
+        pw_dir = str(tmp_path / "spocklamp")
+
+    monkeypatch.setenv("SUDO_USER", "spocklamp")
+    monkeypatch.setattr(local_main.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(local_main.pwd, "getpwnam", lambda name: Pw())
+    roots = [str(p) for p in local_main.look_at_search_roots()]
+    assert str(tmp_path / "spocklamp" / "hermes-agent" / "lelamp_il") in roots
+
+
+def test_resolve_look_at_artifacts_via_env(tmp_path, monkeypatch):
+    from plugins.lelamp import local_main
+
+    il = tmp_path / "lelamp_il"
+    art = il / "artifacts"
+    art.mkdir(parents=True)
+    (art / "tiny_lamp_int8.onnx").write_bytes(b"onnx")
+    (art / "meta.json").write_text("{}")
+    monkeypatch.setenv("LELAMP_IL_DIR", str(il))
+    root, model, meta = local_main.resolve_look_at_artifacts()
+    assert root == il
+    assert model == art / "tiny_lamp_int8.onnx"
+    assert meta == art / "meta.json"
+
+
 def test_sim_watch_person_does_not_play_a_recording():
     lamp = LocalLamp(
         sim=True,
