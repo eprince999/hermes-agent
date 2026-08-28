@@ -76,8 +76,8 @@ AGENT_STAGE = 4
 AGENT_LABEL = "vosk listen + music folder + look-at"
 # If the lamp prints「已看向画面中的人（6.0 秒）」it is still the old runtime copy.
 WATCH_REVISION = "2026-08-28-follow"
-# Printed at boot. If journal has no 2026-08-28-boot2, the Pi is still on the old unit.
-BOOT_REVISION = "2026-08-28-boot2"
+# Printed at boot. If journal has no 2026-08-28-boot3, the Pi is still on the old unit.
+BOOT_REVISION = "2026-08-28-boot3"
 # USB CDC ACM often appears several seconds after systemd starts user services.
 SERIAL_WAIT_SECONDS = 45.0
 
@@ -131,21 +131,31 @@ def _find_uv(home: Optional[Path] = None) -> Optional[Path]:
 
 
 def _runtime_python(runtime_dir: Path) -> Tuple[str, List[str]]:
-    """Return (executable, argv_prefix) for the boot wrapper.
+    """Interpreter for the systemd wrapper.
 
-    Prefer the same ``uv run`` the lamp already uses by hand. Fall back to
-    the runtime venv, then the current interpreter.
+    Use the runtime venv directly. ``uv run`` under systemd can sit on a
+    lock/sync/network and never exec local_main — journal then stops at
+    ``lelamp-local-run …`` with no Python lines.
     """
-    uv = _find_uv()
-    if uv is not None:
-        return str(uv), [str(uv), "run", "--directory", str(runtime_dir), "python"]
     for cand in (
         runtime_dir / ".venv" / "bin" / "python",
         runtime_dir / "venv" / "bin" / "python",
     ):
-        if cand.is_file():
-            return str(cand), [str(cand)]
-    return sys.executable, [sys.executable]
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand), [str(cand), "-u"]
+    uv = _find_uv()
+    if uv is not None:
+        return str(uv), [
+            str(uv),
+            "run",
+            "--offline",
+            "--no-sync",
+            "--directory",
+            str(runtime_dir),
+            "python",
+            "-u",
+        ]
+    return sys.executable, [sys.executable, "-u"]
 
 
 def wait_for_serial_port(port: str, *, timeout: float = SERIAL_WAIT_SECONDS) -> bool:
@@ -197,18 +207,29 @@ export SUDO_USER={shlex.quote(user)}
 export LELAMP_IL_DIR={shlex.quote(str(il_dir))}
 export LELAMP_LISTEN=1
 export PYTHONUNBUFFERED=1
+export UV_NO_SYNC=1
+export UV_OFFLINE=1
 export PATH={shlex.quote(path_env)}
 cd {shlex.quote(str(runtime_dir))} || exit 1
 echo "lelamp-local-run {BOOT_REVISION}" >&2
-i=0
-while [ "$i" -lt 45 ]; do
-  if [ -e {serial} ]; then
-    break
-  fi
-  i=$((i + 1))
-  sleep 1
-done
+if [ -e {serial} ]; then
+  echo "serial ready {serial}" >&2
+else
+  echo "serial missing {serial}, wait up to 8s" >&2
+  i=0
+  while [ "$i" -lt 8 ]; do
+    if [ -e {serial} ]; then
+      echo "serial ready {serial}" >&2
+      break
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+fi
+echo "exec {cmd}" >&2
 exec {cmd}
+echo "exec failed" >&2
+exit 127
 """
 
 

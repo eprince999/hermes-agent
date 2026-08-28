@@ -217,7 +217,7 @@ sudo LELAMP_IL_DIR=/home/spocklamp/hermes-agent/lelamp_il \
 
 覆盖 `local_main.py` 之后必须再跑一次 `--install-service`（或 `install_on_lamp.sh --boot`），否则 systemd 仍是旧 unit。上一版 unit 的 `ExecStartPre` 含 `$()`，systemd 会当成变量，**根本不启动 Python**。
 
-装完立刻确认服务是 active，日志里应有 `boot 2026-08-28-boot2`：
+装完立刻确认服务是 active，日志里应有 `lelamp-local-run 2026-08-28-boot3`、`exec …/python -u …/local_main.py`，然后是 `boot 2026-08-28-boot3`。若 journal 停在 `lelamp-local-run` 没有 `exec`，包装脚本还没跑完。
 
 ```bash
 sudo .venv/bin/python local_main.py --boot-status

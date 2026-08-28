@@ -312,7 +312,28 @@ def test_boot_service_unit_wakes_and_listens(tmp_path):
     assert copied.is_file()
     copied_text = copied.read_text(encoding="utf-8")
     assert 'WATCH_REVISION = "2026-08-28-follow"' in copied_text
-    assert 'BOOT_REVISION = "2026-08-28-boot2"' in copied_text
+    assert 'BOOT_REVISION = "2026-08-28-boot3"' in copied_text
+    assert "exec " in body
+    assert "UV_OFFLINE=1" in body
+
+
+def test_boot_wrapper_uses_venv_python_not_uv(tmp_path):
+    from plugins.lelamp import local_main
+
+    runtime = tmp_path / "runtime"
+    venv_py = runtime / ".venv" / "bin" / "python"
+    venv_py.parent.mkdir(parents=True)
+    venv_py.write_text("#!/bin/sh\n", encoding="utf-8")
+    venv_py.chmod(0o755)
+    dest = local_main.install_boot_service(
+        runtime_dir=runtime,
+        unit_path=tmp_path / "lelamp-local.service",
+        enable=False,
+    )
+    body = (runtime / "lelamp-local-run.sh").read_text(encoding="utf-8")
+    assert str(venv_py) in body
+    assert " uv " not in body
+    assert "$" not in dest.read_text(encoding="utf-8")
 
 
 def test_wait_for_serial_port_finds_existing_node(tmp_path):
@@ -461,7 +482,7 @@ def test_tracked_stage2_archive_has_no_music_player():
     installer = root.parent / "install_on_lamp.sh"
     script = installer.read_text(encoding="utf-8")
     assert "2026-08-28-follow" in script
-    assert "2026-08-28-boot2" in script
+    assert "2026-08-28-boot3" in script
     assert 'DEST="$DEST_DIR/local_main.py"' in script
 
 
