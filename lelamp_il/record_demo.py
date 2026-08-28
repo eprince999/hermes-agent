@@ -34,10 +34,21 @@ from pathlib import Path
 
 from PIL import Image
 
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+from feetech_bus import (
+    Sts3215Bus,
+    add_runtime_site_packages,
+    uv_run_hint,
+)
+
 # Official runtime lives next to this repo on the lamp; Leader import needs it on sys.path.
 _RUNTIME = Path.home() / "lelamp_runtime"
 if _RUNTIME.is_dir() and str(_RUNTIME) not in sys.path:
     sys.path.insert(0, str(_RUNTIME))
+add_runtime_site_packages()
 
 JOINT_NAMES = (
     "base_yaw",
@@ -117,9 +128,12 @@ class LeLampJoints(JointSource):
         self.lamp_id = lamp_id
         self._leader = None
         self._bus = None
+        self._sts = None
         self._names = list(JOINT_NAMES)
 
     def connect(self) -> str:
+        errors: list[str] = []
+
         try:
             from lelamp.leader import LeLampLeader, LeLampLeaderConfig
 
@@ -135,32 +149,54 @@ class LeLampJoints(JointSource):
                 f"力矩已关闭，可用手摆  当前={_fmt_joints(short)}"
             )
         except Exception as leader_exc:
-            try:
-                from lerobot.motors import Motor, MotorNormMode
-                from lerobot.motors.feetech import FeetechMotorsBus
+            errors.append(f"LeLampLeader: {leader_exc}")
 
-                motors = {
-                    name: Motor(i + 1, "sts3215", MotorNormMode.DEGREES)
-                    for i, name in enumerate(self._names)
-                }
-                bus = FeetechMotorsBus(port=self.port, motors=motors)
-                bus.connect()
-                bus.disable_torque()
-                self._bus = bus
-                return (
-                    f"Feetech {self.port}  力矩已关闭，可用手摆  "
-                    f"(LeLampLeader 不可用: {leader_exc.__class__.__name__})"
-                )
-            except Exception as bus_exc:
-                raise RuntimeError(
-                    f"无法连接舵机。LeLampLeader: {leader_exc}; Feetech: {bus_exc}\n"
-                    "没有灯时请加 --dummy。"
-                ) from bus_exc
+        try:
+            from lerobot.motors import Motor, MotorNormMode
+            from lerobot.motors.feetech import FeetechMotorsBus
+
+            motors = {
+                name: Motor(i + 1, "sts3215", MotorNormMode.DEGREES)
+                for i, name in enumerate(self._names)
+            }
+            bus = FeetechMotorsBus(port=self.port, motors=motors)
+            bus.connect()
+            bus.disable_torque()
+            self._bus = bus
+            return (
+                f"Feetech {self.port}  力矩已关闭，可用手摆  "
+                f"(LeLampLeader 不可用)"
+            )
+        except Exception as bus_exc:
+            errors.append(f"lerobot Feetech: {bus_exc}")
+
+        try:
+            sts = Sts3215Bus(self.port, tuple(self._names))
+            label = sts.connect()
+            sts.disable_torque()
+            probe = sts.read_degrees()
+            self._sts = sts
+            return (
+                f"{label}  力矩已关闭，可用手摆（不经过 lerobot）  "
+                f"当前={_fmt_joints(probe)}"
+            )
+        except Exception as sts_exc:
+            errors.append(f"scservo_sdk: {sts_exc}")
+
+        raise RuntimeError(
+            "无法连接舵机。\n  - "
+            + "\n  - ".join(errors)
+            + "\n"
+            + uv_run_hint("record_demo.py")
+            + "\n没有灯时才加 --dummy。"
+        )
 
     def read(self) -> dict[str, float]:
         if self._leader is not None:
             raw = self._leader.get_action()
             return {name: float(raw[f"{name}.pos"]) for name in self._names}
+        if self._sts is not None:
+            return self._sts.read_degrees()
         present = self._bus.sync_read("Present_Position")
         return {name: float(present[name]) for name in self._names}
 
@@ -174,6 +210,9 @@ class LeLampJoints(JointSource):
             except TypeError:
                 self._bus.disconnect()
             self._bus = None
+        if self._sts is not None:
+            self._sts.close()
+            self._sts = None
 
 
 class DummyJoints(JointSource):

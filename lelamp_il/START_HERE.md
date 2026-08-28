@@ -80,7 +80,20 @@ source ~/lelamp_runtime/.venv/bin/activate
 python3 -c "from picamera2 import Picamera2; print('venv picamera2 ok')"
 ```
 
-确认 `venv picamera2 ok` 之后再录（不要用 `--dummy`）：
+确认 `venv picamera2 ok` 之后再录（不要用 `--dummy`，也不要 `pip install lerobot`）。
+
+当前这个 Python 如果报 `No module named 'lerobot'`，说明你没用灯已经能转头的那个解释器。优先：
+
+```bash
+# 语音已停
+cd ~/lelamp_runtime
+sudo uv run python ~/hermes-agent/lelamp_il/record_demo.py --task look_at_person \
+    --port /dev/ttyACM0 --id lelamp --episodes 2 --seconds 6
+```
+
+`uv run` 就是日常点头/放歌用的环境，里面已经有舵机库。新版本的 `record_demo.py` 也会在没有 lerobot 时走 `scservo_sdk`（runtime 自带的 feetech-servo-sdk）。
+
+或在已激活的 runtime venv 里：
 
 ```bash
 cd ~/hermes-agent/lelamp_il
@@ -94,10 +107,9 @@ python record_demo.py --task look_at_person --port /dev/ttyACM0 --id lelamp \
 
 ```bash
 # 树莓派上，语音已停，且上一步 venv 已能 import picamera2
-cd ~/hermes-agent/lelamp_il
-source ~/lelamp_runtime/.venv/bin/activate
-python record_demo.py --task look_at_person --port /dev/ttyACM0 --id lelamp \
-    --episodes 2 --seconds 6
+cd ~/lelamp_runtime
+sudo uv run python ~/hermes-agent/lelamp_il/record_demo.py --task look_at_person \
+    --port /dev/ttyACM0 --id lelamp --episodes 2 --seconds 6
 ```
 
 脚本会关掉力矩。每一段：你站到一个位置 → Enter → 倒计时结束 → **用手把灯头转到看着你的脸**，保持 6 秒。

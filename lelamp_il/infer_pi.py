@@ -21,6 +21,10 @@ import sys
 import time
 from pathlib import Path
 
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
 import numpy as np
 
 try:
@@ -107,12 +111,13 @@ def open_camera(index: int):
 
 
 class MotorBus:
-    """Thin Feetech wrapper. Falls back to a dummy pose if the SDK is missing."""
+    """Feetech wrapper. Prefers lerobot, then scservo_sdk. Dummy if neither works."""
 
     def __init__(self, port: str | None, joint_names: list[str]) -> None:
         self.port = port
         self.joint_names = joint_names
         self._bus = None
+        self._sts = None
         self._dummy = np.zeros(len(joint_names), dtype=np.float32)
         if not port:
             print("no --port: running without motors")
@@ -121,7 +126,7 @@ class MotorBus:
             from lerobot.motors import Motor, MotorNormMode
             from lerobot.motors.feetech import FeetechMotorsBus
         except Exception as exc:
-            print(f"Feetech/LeRobot not installed ({exc}); dummy joints only")
+            self._connect_sts(str(exc))
             return
         motors = {
             name: Motor(i + 1, "sts3215", MotorNormMode.DEGREES)
@@ -131,7 +136,27 @@ class MotorBus:
         self._bus.connect()
         print(f"connected Feetech bus on {port}")
 
+    def _connect_sts(self, lerobot_exc: str) -> None:
+        try:
+            from feetech_bus import Sts3215Bus, add_runtime_site_packages
+
+            add_runtime_site_packages()
+            sts = Sts3215Bus(self.port, tuple(self.joint_names))
+            print(sts.connect())
+            sts.enable_torque()
+            self._sts = sts
+        except Exception as exc:
+            print(
+                f"Feetech/LeRobot not installed ({lerobot_exc}); "
+                f"scservo_sdk also failed ({exc}); dummy joints only"
+            )
+
     def read_joints(self) -> np.ndarray:
+        if self._sts is not None:
+            pose = self._sts.read_degrees()
+            return np.asarray(
+                [float(pose[name]) for name in self.joint_names], dtype=np.float32
+            )
         if self._bus is None:
             return self._dummy.copy()
         present = self._bus.sync_read("Present_Position")
@@ -140,6 +165,10 @@ class MotorBus:
         )
 
     def write_joints(self, targets: np.ndarray) -> None:
+        if self._sts is not None:
+            goal = {name: float(targets[i]) for i, name in enumerate(self.joint_names)}
+            self._sts.write_degrees(goal)
+            return
         if self._bus is None:
             self._dummy = targets.astype(np.float32)
             return
@@ -147,8 +176,12 @@ class MotorBus:
         self._bus.sync_write("Goal_Position", goal)
 
     def close(self) -> None:
+        if self._sts is not None:
+            self._sts.close()
+            self._sts = None
         if self._bus is not None:
             self._bus.disconnect(True)
+            self._bus = None
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
