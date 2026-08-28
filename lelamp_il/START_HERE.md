@@ -80,7 +80,14 @@ source ~/lelamp_runtime/.venv/bin/activate
 python3 -c "from picamera2 import Picamera2; print('venv picamera2 ok')"
 ```
 
-确认 `venv picamera2 ok` 之后再录（不要用 `--dummy`，也不要 `pip install lerobot`）。
+确认启动时打印 ``revision 2026-08-28-raw-sts``。如果没有这一行，灯上还是旧文件，需要：
+
+```bash
+cd ~/hermes-agent
+git fetch origin cursor/lelamp-zero2w-train-36b0
+git checkout cursor/lelamp-zero2w-train-36b0
+git pull origin cursor/lelamp-zero2w-train-36b0
+```
 
 当前这个 Python 如果报 `No module named 'lerobot'`，说明你没用灯已经能转头的那个解释器。优先：
 

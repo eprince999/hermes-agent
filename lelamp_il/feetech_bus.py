@@ -1,15 +1,18 @@
 """STS3215 bus that does not import lerobot.
 
-Official LeLamp runtime talks to the same Feetech bus through lerobot.
-The lamp's ``uv run`` environment already has that stack. Recording from
-another venv (the one that only has pillow + picamera2) must use the
-lighter ``scservo_sdk`` package from ``feetech-servo-sdk``.
+Recording often runs in a slim venv (pillow + picamera2). Official
+LeLampLeader needs ``lelamp`` + ``lerobot`` from ``uv run``. This module
+tries, in order: that venv's site-packages, ``scservo_sdk``, then a
+stdlib termios talker that only needs ``/dev/ttyACM0``.
 """
 
 from __future__ import annotations
 
 import os
+import select
 import sys
+import termios
+import time
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +30,9 @@ ADDR_TORQUE_ENABLE = 40
 ADDR_GOAL_POSITION = 42
 ADDR_PRESENT_POSITION = 56
 ADDR_LOCK = 55
+INST_PING = 1
+INST_READ = 2
+INST_WRITE = 3
 TICKS_PER_TURN = 4096
 TICK_CENTER = 2048
 BAUDRATES = (1_000_000, 115_200)
@@ -42,23 +48,76 @@ def degrees_to_ticks(degrees: float) -> int:
     return max(0, min(TICKS_PER_TURN - 1, ticks))
 
 
-def add_runtime_site_packages() -> list[str]:
-    """Put the official runtime venv on sys.path so ``import lerobot`` can work.
+def build_packet(servo_id: int, instruction: int, params: bytes = b"") -> bytes:
+    """Feetech protocol 0 (SMS/STS) instruction packet."""
+    length = len(params) + 2
+    body = bytes([servo_id & 0xFF, length & 0xFF, instruction & 0xFF]) + params
+    return b"\xff\xff" + body + bytes([(~sum(body)) & 0xFF])
 
-    ``record_demo.py`` already adds ``~/lelamp_runtime`` (the source tree).
-    ``lerobot`` lives in that project's ``.venv`` site-packages, not in the
-    source tree — that is why Leader fails with ``No module named 'lerobot'``.
-    """
-    roots: list[Path] = [
-        Path.home() / "lelamp_runtime" / ".venv",
-        Path.home() / "lelamp_runtime" / "venv",
+
+def split_status_packets(buf: bytes) -> tuple[list[tuple[int, int, bytes]], bytes]:
+    """Parse complete status packets; return (packets, leftover)."""
+    packets: list[tuple[int, int, bytes]] = []
+    i = 0
+    while i + 6 <= len(buf):
+        if buf[i] != 0xFF or buf[i + 1] != 0xFF:
+            i += 1
+            continue
+        if i + 4 > len(buf):
+            break
+        servo_id = buf[i + 2]
+        length = buf[i + 3]
+        end = i + 4 + length
+        if end > len(buf):
+            break
+        frame = buf[i + 2 : end]
+        if ((~sum(frame[:-1])) & 0xFF) != frame[-1]:
+            i += 1
+            continue
+        error = frame[2]
+        params = frame[3:-1]
+        packets.append((servo_id, error, params))
+        i = end
+    return packets, buf[i:]
+
+
+def find_runtime_roots() -> list[Path]:
+    home = Path.home()
+    here = Path(__file__).resolve().parent
+    extra = (os.environ.get("LELAMP_RUNTIME") or "").strip()
+    candidates = [
+        Path(extra) if extra else None,
+        home / "lelamp_runtime",
+        home / "lelamp",
+        here.parent.parent / "lelamp_runtime",
+        here.parent / "lelamp_runtime",
+        Path("/home/spocklamp/lelamp_runtime"),
     ]
-    env = (os.environ.get("VIRTUAL_ENV") or "").strip()
-    if env:
-        roots.append(Path(env))
+    roots: list[Path] = []
+    for item in candidates:
+        if item is None:
+            continue
+        resolved = item.expanduser()
+        if resolved.is_dir() and resolved not in roots:
+            roots.append(resolved)
+    return roots
+
+
+def add_runtime_site_packages() -> list[str]:
+    """Put official runtime source + venv site-packages on sys.path."""
     added: list[str] = []
-    for root in roots:
-        for site in sorted(root.glob("lib/python*/site-packages")):
+    env = (os.environ.get("VIRTUAL_ENV") or "").strip()
+    venv_roots = [Path(env)] if env else []
+    for runtime in find_runtime_roots():
+        src = str(runtime)
+        if src not in sys.path:
+            sys.path.insert(0, src)
+            added.append(src)
+        venv_roots.extend([runtime / ".venv", runtime / "venv"])
+    for root in venv_roots:
+        if not root:
+            continue
+        for site in sorted(Path(root).glob("lib/python*/site-packages")):
             path = str(site)
             if path not in sys.path:
                 sys.path.append(path)
@@ -174,6 +233,167 @@ class Sts3215Bus:
 
     def _write1(self, servo_id: int, addr: int, value: int) -> None:
         self._packet.write1ByteTxRx(self._port, servo_id, addr, int(value))
+
+
+def _termios_baud_flag(baud: int) -> int:
+    table = {
+        115200: termios.B115200,
+        57600: termios.B57600,
+        9600: termios.B9600,
+    }
+    if baud == 1_000_000:
+        flag = getattr(termios, "B1000000", None)
+        if flag is None:
+            raise RuntimeError("这个 Python 的 termios 没有 B1000000")
+        return int(flag)
+    if baud not in table:
+        raise RuntimeError(f"不支持波特率 {baud}")
+    return int(table[baud])
+
+
+def _open_tty(port: str, baud: int) -> int:
+    fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    try:
+        flag = _termios_baud_flag(baud)
+        attrs = termios.tcgetattr(fd)
+        attrs[0] = 0
+        attrs[1] = 0
+        cflag = termios.CS8 | termios.CLOCAL | termios.CREAD
+        if hasattr(termios, "CRTSCTS"):
+            cflag &= ~termios.CRTSCTS
+        attrs[2] = cflag
+        attrs[3] = 0
+        attrs[4] = flag
+        attrs[5] = flag
+        cc = list(attrs[6])
+        cc[termios.VMIN] = 0
+        cc[termios.VTIME] = 1
+        attrs[6] = list(cc)
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        termios.tcflush(fd, termios.TCIOFLUSH)
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+class Sts3215RawBus:
+    """Talk STS3215 with stdlib termios. No lerobot, no scservo_sdk."""
+
+    def __init__(self, port: str, joint_names: tuple[str, ...] = JOINT_NAMES) -> None:
+        self.port = port
+        self.joint_names = list(joint_names)
+        self._fd: int | None = None
+        self._baud = 0
+
+    def connect(self) -> str:
+        last: Exception | None = None
+        for baud in BAUDRATES:
+            fd = None
+            try:
+                fd = _open_tty(self.port, baud)
+                self._fd = fd
+                self._baud = baud
+                self._probe()
+                return f"STS3215 raw {self.port} baud={baud}"
+            except Exception as exc:
+                last = exc
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                self._fd = None
+        raise RuntimeError(f"STS3215 raw 打不开: {last}") from last
+
+    def disable_torque(self) -> None:
+        for name in self.joint_names:
+            sid = JOINT_IDS[name]
+            self._write_u8(sid, ADDR_LOCK, 0)
+            self._write_u8(sid, ADDR_TORQUE_ENABLE, 0)
+
+    def enable_torque(self) -> None:
+        for name in self.joint_names:
+            sid = JOINT_IDS[name]
+            self._write_u8(sid, ADDR_TORQUE_ENABLE, 1)
+            self._write_u8(sid, ADDR_LOCK, 1)
+
+    def read_degrees(self) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for name in self.joint_names:
+            sid = JOINT_IDS[name]
+            raw = self._read_u16(sid, ADDR_PRESENT_POSITION)
+            out[name] = ticks_to_degrees(raw)
+        return out
+
+    def write_degrees(self, values: dict[str, float]) -> None:
+        for name in self.joint_names:
+            if name not in values:
+                continue
+            ticks = degrees_to_ticks(values[name])
+            sid = JOINT_IDS[name]
+            self._write_u16(sid, ADDR_GOAL_POSITION, ticks)
+
+    def close(self) -> None:
+        fd = self._fd
+        self._fd = None
+        if fd is None:
+            return
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    def _probe(self) -> None:
+        sid = JOINT_IDS[self.joint_names[0]]
+        self._read_u16(sid, ADDR_PRESENT_POSITION)
+
+    def _write_u8(self, servo_id: int, addr: int, value: int) -> None:
+        self._xfer(build_packet(servo_id, INST_WRITE, bytes([addr, int(value) & 0xFF])))
+
+    def _write_u16(self, servo_id: int, addr: int, value: int) -> None:
+        value = int(value) & 0xFFFF
+        payload = bytes([addr, value & 0xFF, (value >> 8) & 0xFF])
+        self._xfer(build_packet(servo_id, INST_WRITE, payload))
+
+    def _read_u16(self, servo_id: int, addr: int) -> int:
+        _sid, error, params = self._xfer(
+            build_packet(servo_id, INST_READ, bytes([addr, 2])),
+            expect_id=servo_id,
+        )
+        if error:
+            raise RuntimeError(f"舵机 {servo_id} 读 0x{addr:02x} error={error}")
+        if len(params) < 2:
+            raise RuntimeError(f"舵机 {servo_id} 读到的字节不够: {params!r}")
+        return params[0] | (params[1] << 8)
+
+    def _xfer(
+        self, packet: bytes, *, expect_id: int | None = None, timeout: float = 0.25
+    ) -> tuple[int, int, bytes]:
+        fd = self._fd
+        if fd is None:
+            raise RuntimeError("串口未打开")
+        try:
+            termios.tcflush(fd, termios.TCIFLUSH)
+        except termios.error:
+            pass
+        os.write(fd, packet)
+        deadline = time.monotonic() + timeout
+        buf = b""
+        while time.monotonic() < deadline:
+            wait = max(0.0, deadline - time.monotonic())
+            ready, _, _ = select.select([fd], [], [], wait)
+            if not ready:
+                continue
+            chunk = os.read(fd, 64)
+            if not chunk:
+                continue
+            buf += chunk
+            packets, buf = split_status_packets(buf)
+            for servo_id, error, params in packets:
+                if expect_id is None or servo_id == expect_id:
+                    return servo_id, error, params
+        raise TimeoutError(f"舵机无响应 ({self.port})")
 
 
 def _as_u16(value: int) -> int:

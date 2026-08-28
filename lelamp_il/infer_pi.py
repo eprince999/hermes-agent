@@ -137,19 +137,20 @@ class MotorBus:
         print(f"connected Feetech bus on {port}")
 
     def _connect_sts(self, lerobot_exc: str) -> None:
-        try:
-            from feetech_bus import Sts3215Bus, add_runtime_site_packages
+        from feetech_bus import Sts3215Bus, Sts3215RawBus, add_runtime_site_packages
 
-            add_runtime_site_packages()
-            sts = Sts3215Bus(self.port, tuple(self.joint_names))
-            print(sts.connect())
-            sts.enable_torque()
-            self._sts = sts
-        except Exception as exc:
-            print(
-                f"Feetech/LeRobot not installed ({lerobot_exc}); "
-                f"scservo_sdk also failed ({exc}); dummy joints only"
-            )
+        add_runtime_site_packages()
+        errors = [f"lerobot: {lerobot_exc}"]
+        for cls in (Sts3215Bus, Sts3215RawBus):
+            try:
+                sts = cls(self.port, tuple(self.joint_names))
+                print(sts.connect())
+                sts.enable_torque()
+                self._sts = sts
+                return
+            except Exception as exc:
+                errors.append(f"{cls.__name__}: {exc}")
+        print("舵机回退失败: " + " | ".join(errors) + "；dummy joints only")
 
     def read_joints(self) -> np.ndarray:
         if self._sts is not None:

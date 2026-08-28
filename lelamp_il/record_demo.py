@@ -40,14 +40,13 @@ if str(_HERE) not in sys.path:
 
 from feetech_bus import (
     Sts3215Bus,
+    Sts3215RawBus,
     add_runtime_site_packages,
     uv_run_hint,
 )
 
-# Official runtime lives next to this repo on the lamp; Leader import needs it on sys.path.
-_RUNTIME = Path.home() / "lelamp_runtime"
-if _RUNTIME.is_dir() and str(_RUNTIME) not in sys.path:
-    sys.path.insert(0, str(_RUNTIME))
+RECORD_DEMO_REVISION = "2026-08-28-raw-sts"
+
 add_runtime_site_packages()
 
 JOINT_NAMES = (
@@ -182,6 +181,19 @@ class LeLampJoints(JointSource):
             )
         except Exception as sts_exc:
             errors.append(f"scservo_sdk: {sts_exc}")
+
+        try:
+            raw = Sts3215RawBus(self.port, tuple(self._names))
+            label = raw.connect()
+            raw.disable_torque()
+            probe = raw.read_degrees()
+            self._sts = raw
+            return (
+                f"{label}  力矩已关闭，可用手摆（纯串口，无 lerobot）  "
+                f"当前={_fmt_joints(probe)}"
+            )
+        except Exception as raw_exc:
+            errors.append(f"raw STS3215: {raw_exc}")
 
         raise RuntimeError(
             "无法连接舵机。\n  - "
@@ -472,6 +484,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print("=" * 60)
     print("LeLamp 示教录制（接在已有中文语音灯上，只补「看人」）")
+    print(f"revision {RECORD_DEMO_REVISION}")
+    print(f"file {Path(__file__).resolve()}")
     print("=" * 60)
     print(
         "你的灯已有：中文指令、放音乐、点头/摇头等动画。这些都不要卸。\n"
