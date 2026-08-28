@@ -98,7 +98,7 @@ sudo uv run python ~/hermes-agent/lelamp_il/record_demo.py --task look_at_person
     --port /dev/ttyACM0 --id lelamp --episodes 2 --seconds 6
 ```
 
-`uv run` 就是日常点头/放歌用的环境，里面已经有舵机库。新版本的 `record_demo.py` 也会在没有 lerobot 时走 `scservo_sdk`（runtime 自带的 feetech-servo-sdk）。
+`uv run` 就是日常点头/放歌用的环境。新脚本即使没有 `lelamp`/`lerobot` 也会用纯串口读 STS3215。不要 `--dummy`，不要 pip install lerobot。
 
 或在已激活的 runtime venv 里：
 
