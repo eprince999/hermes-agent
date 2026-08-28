@@ -223,6 +223,19 @@ sudo LELAMP_IL_DIR=/home/spocklamp/hermes-agent/lelamp_il \
 sudo .venv/bin/python local_main.py --boot-status
 ```
 
+检测五个舵机（只 ping / 读位置，**不** `setup_motors` / calibrate）。开机服务占着串口时先停掉：
+
+```bash
+sudo systemctl stop lelamp-local
+cd ~/lelamp_runtime
+sudo LELAMP_IL_DIR=/home/spocklamp/hermes-agent/lelamp_il \
+  .venv/bin/python local_main.py --check-motors
+# 五个都 OK 再看动作：
+# sudo LELAMP_IL_DIR=/home/spocklamp/hermes-agent/lelamp_il \
+#   .venv/bin/python local_main.py --check-motors --wiggle
+sudo systemctl start lelamp-local
+```
+
 ---
 
 ## 不要做的事

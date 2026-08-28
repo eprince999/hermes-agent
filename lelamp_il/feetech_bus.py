@@ -14,7 +14,7 @@ import sys
 import termios
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 JOINT_NAMES = (
     "base_yaw",
@@ -401,3 +401,101 @@ def _as_u16(value: int) -> int:
     if raw < 0:
         raw &= 0xFFFF
     return raw
+
+
+def probe_servos(port: str) -> tuple[str, list[dict[str, Any]]]:
+    """Read-only health check: ping ids 1–5 and read present position.
+
+    Never enables torque, never writes a goal, never runs setup/calibrate.
+    """
+    if not Path(port).exists():
+        raise FileNotFoundError(f"没有串口 {port}")
+    last: Exception | None = None
+    for baud in BAUDRATES:
+        fd = None
+        try:
+            fd = _open_tty(port, baud)
+            bus = Sts3215RawBus(port)
+            bus._fd = fd
+            bus._baud = baud
+            rows: list[dict[str, Any]] = []
+            any_ok = False
+            for name in JOINT_NAMES:
+                sid = JOINT_IDS[name]
+                row: dict[str, Any] = {
+                    "id": sid,
+                    "name": name,
+                    "ok": False,
+                    "degrees": None,
+                    "detail": "",
+                }
+                try:
+                    bus._xfer(
+                        build_packet(sid, INST_PING),
+                        expect_id=sid,
+                        timeout=0.2,
+                    )
+                    ticks = bus._read_u16(sid, ADDR_PRESENT_POSITION)
+                    row["ok"] = True
+                    row["degrees"] = round(ticks_to_degrees(ticks), 1)
+                    row["detail"] = f"ticks={ticks}"
+                    any_ok = True
+                except Exception as exc:
+                    row["detail"] = str(exc)
+                rows.append(row)
+            bus._fd = None
+            if any_ok:
+                return f"STS3215 {port} baud={baud}", rows
+            last = RuntimeError(f"波特率 {baud} 下五个舵机都没应答")
+        except Exception as exc:
+            last = exc
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+    raise RuntimeError(f"舵机检测失败: {last}") from last
+
+
+def format_probe_report(link: str, rows: list[dict[str, Any]]) -> str:
+    lines = [f"链路 {link}", "id  name          应答  角度"]
+    for row in rows:
+        deg = "—" if row.get("degrees") is None else f"{row['degrees']:>6.1f}"
+        flag = "OK" if row.get("ok") else "FAIL"
+        lines.append(
+            f"{int(row['id']):2d}  {str(row['name']):<12}  {flag:<4}  {deg}  {row.get('detail') or ''}"
+        )
+    ok_n = sum(1 for row in rows if row.get("ok"))
+    lines.append(f"{ok_n}/{len(rows)} 个舵机应答")
+    if ok_n == len(rows) and rows:
+        lines.append("五个舵机都正常（只读检测，没有重新校准）。")
+    elif ok_n:
+        missing = [str(row["name"]) for row in rows if not row.get("ok")]
+        lines.append("无应答: " + ", ".join(missing))
+    else:
+        lines.append("一个舵机都没应答。串口、供电、或被别的进程占用。")
+    return "\n".join(lines)
+
+
+def _probe_main(argv: Optional[list[str]] = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Read-only STS3215 ping (no calibrate)")
+    parser.add_argument("--probe", action="store_true")
+    parser.add_argument("--port", default=os.environ.get("LELAMP_PORT", "/dev/ttyACM0"))
+    args = parser.parse_args(argv)
+    if not args.probe:
+        parser.print_help()
+        return 2
+    try:
+        link, rows = probe_servos(args.port)
+    except Exception as exc:
+        print(f"检测失败: {exc}")
+        return 1
+    print(format_probe_report(link, rows))
+    return 0 if rows and all(row.get("ok") for row in rows) else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_probe_main())

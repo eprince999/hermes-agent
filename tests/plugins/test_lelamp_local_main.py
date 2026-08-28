@@ -331,7 +331,7 @@ def test_boot_wrapper_uses_venv_python_not_uv(tmp_path):
         enable=False,
     )
     body = (runtime / "lelamp-local-run.sh").read_text(encoding="utf-8")
-    assert str(venv_py) in body
+    assert ".venv/bin/python" in body
     assert " uv " not in body
     assert "$" not in dest.read_text(encoding="utf-8")
 
@@ -351,6 +351,62 @@ def test_wait_for_serial_port_times_out(tmp_path):
     t0 = time.monotonic()
     assert wait_for_serial_port(str(missing), timeout=0.25) is False
     assert time.monotonic() - t0 < 1.5
+
+
+def test_check_motors_missing_port(tmp_path, capsys):
+    from plugins.lelamp import local_main
+
+    missing = tmp_path / "no-acm"
+    assert local_main.main(["--check-motors", "--port", str(missing)]) == 1
+    assert "没有串口" in capsys.readouterr().out
+
+
+def test_check_motors_all_five_ok(monkeypatch, tmp_path, capsys):
+    from plugins.lelamp import local_main
+
+    port = tmp_path / "ttyACM0"
+    port.write_text("", encoding="utf-8")
+    names = ("base_yaw", "base_pitch", "elbow_pitch", "wrist_roll", "wrist_pitch")
+    rows = [
+        {"id": i, "name": name, "ok": True, "degrees": 1.0, "detail": "ticks=2048"}
+        for i, name in enumerate(names, start=1)
+    ]
+
+    class FakeBus:
+        @staticmethod
+        def probe_servos(_port):
+            return "STS3215 fake baud=1000000", rows
+
+        @staticmethod
+        def format_probe_report(link, _rows):
+            return f"链路 {link}\n5/5 个舵机应答\n五个舵机都正常（只读检测，没有重新校准）。"
+
+    monkeypatch.setattr(local_main, "_load_feetech_bus", lambda: FakeBus)
+    monkeypatch.setattr(local_main, "serial_port_users", lambda _p: [])
+    assert local_main.main(["--check-motors", "--port", str(port)]) == 0
+    out = capsys.readouterr().out
+    assert "5/5" in out
+    assert "没有重新校准" in out
+
+
+def test_check_motors_busy_port_still_explains(monkeypatch, tmp_path, capsys):
+    from plugins.lelamp import local_main
+
+    port = tmp_path / "ttyACM0"
+    port.write_text("", encoding="utf-8")
+
+    def boom(_port):
+        raise RuntimeError("device busy")
+
+    class FakeBus:
+        probe_servos = staticmethod(boom)
+
+    monkeypatch.setattr(local_main, "_load_feetech_bus", lambda: FakeBus)
+    monkeypatch.setattr(local_main, "serial_port_users", lambda _p: ["1234"])
+    assert local_main.main(["--check-motors", "--port", str(port)]) == 1
+    out = capsys.readouterr().out
+    assert "PID=1234" in out
+    assert "stop lelamp-local" in out
 
 
 def test_wake_failure_still_listens(monkeypatch):

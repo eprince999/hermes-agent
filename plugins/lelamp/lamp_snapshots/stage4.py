@@ -10,6 +10,8 @@ Snapshot 3 is the music-folder archive. This file is snapshot 4::
     sudo uv run python local_main.py --listen
     sudo uv run python local_main.py --install-service
     sudo uv run python local_main.py --boot-status
+    sudo uv run python local_main.py --check-motors
+    sudo uv run python local_main.py --check-motors --wiggle
 
 ``--install-service`` writes systemd unit ``lelamp-local``: on boot the
 lamp runs this file, plays wake_up in the dark, fades 0→80% in the last
@@ -2030,6 +2032,103 @@ def resolve_look_at_artifacts() -> Tuple[Optional[Path], Optional[Path], Optiona
     return None, None, None
 
 
+def _load_feetech_bus():
+    """Load lelamp_il/feetech_bus.py by path (same search as look-at)."""
+    seen = set()
+    for folder in look_at_search_roots():
+        for path in (folder / "feetech_bus.py", folder / "lelamp_il" / "feetech_bus.py"):
+            resolved = path.resolve() if path.is_file() else None
+            if resolved is None or resolved in seen:
+                continue
+            seen.add(resolved)
+            spec = importlib.util.spec_from_file_location(
+                f"lelamp_feetech_{abs(hash(str(resolved)))}",
+                resolved,
+            )
+            if spec is None or spec.loader is None:
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            if callable(getattr(mod, "probe_servos", None)):
+                return mod
+    raise ImportError(
+        "找不到 feetech_bus.py。应在 /home/spocklamp/hermes-agent/lelamp_il/ 。"
+        "可设 LELAMP_IL_DIR=/home/spocklamp/hermes-agent/lelamp_il"
+    )
+
+
+def serial_port_users(port: str) -> List[str]:
+    """PIDs (and names if possible) holding the Feetech USB serial node."""
+    users: List[str] = []
+    fuser = shutil.which("fuser")
+    if fuser:
+        proc = subprocess.run(
+            [fuser, "-v", port],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        text = (proc.stdout or "") + (proc.stderr or "")
+        for raw in text.split():
+            if raw.isdigit() and raw not in users:
+                users.append(raw)
+    return users
+
+
+def check_motors(*, port: str, wiggle: bool = False) -> int:
+    """Ping five STS3215 servos and read positions. Does not calibrate."""
+    port = (port or "/dev/ttyACM0").strip() or "/dev/ttyACM0"
+    print(f"check-motors {port}", flush=True)
+    path = Path(port)
+    print(f"  节点 exists={path.exists()}", flush=True)
+    if not path.exists():
+        print("  没有串口。舵机 USB 没枚举，或口不是 ACM0。")
+        return 1
+    holders = serial_port_users(port)
+    if holders:
+        print(f"  串口被占用 PID={','.join(holders)}", flush=True)
+        print("  先停开机服务再测：sudo systemctl stop lelamp-local", flush=True)
+    else:
+        print("  串口空闲", flush=True)
+    try:
+        mod = _load_feetech_bus()
+        link, rows = mod.probe_servos(port)
+    except Exception as exc:
+        print(f"检测失败: {exc}", flush=True)
+        if holders:
+            print("多半是 lelamp-local 占着串口。停掉后再跑 --check-motors。", flush=True)
+        return 1
+    report = mod.format_probe_report(link, rows)
+    print(report, flush=True)
+    all_ok = bool(rows) and all(row.get("ok") for row in rows)
+    if wiggle and all_ok:
+        try:
+            from lelamp.service.motors.motors_service import MotorsService
+
+            print("五个都在，点头一次确认动作（不是校准）…", flush=True)
+            svc = MotorsService(port=port, lamp_id="lelamp", fps=30)
+            svc.start()
+            try:
+                svc.dispatch("play", "nod")
+                time.sleep(2.5)
+            finally:
+                for name in ("stop", "close", "disconnect"):
+                    fn = getattr(svc, name, None)
+                    if callable(fn):
+                        try:
+                            fn()
+                        except Exception:
+                            pass
+                        break
+            print("点头已发出。", flush=True)
+        except Exception as exc:
+            print(f"点头失败: {exc}", flush=True)
+            return 1
+    elif not wiggle and all_ok:
+        print("若要看动作，加 --wiggle（会点头一次，仍不校准）。", flush=True)
+    return 0 if all_ok else 1
+
+
 def _import_run_watch_person():
     """Load lelamp_il.agent_hook without importing onnxruntime at module import.
 
@@ -2615,6 +2714,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print systemd unit, wrapper, and journal for lelamp-local",
     )
+    parser.add_argument(
+        "--check-motors",
+        action="store_true",
+        help="ping five STS3215 servos and read positions (no calibrate)",
+    )
+    parser.add_argument(
+        "--wiggle",
+        action="store_true",
+        help="with --check-motors, play nod once after a successful ping",
+    )
     parser.add_argument("--download-vosk", action="store_true", help="download offline Chinese Vosk model")
     parser.add_argument("--say", action="append", default=[], help="inject a spoken phrase (repeatable)")
     parser.add_argument("--device", type=int, default=None, help="sounddevice input index")
@@ -2653,6 +2762,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
     if args.boot_status:
         return print_boot_status()
+    if args.check_motors:
+        return check_motors(port=args.port, wiggle=args.wiggle)
     print(f"local_main  stage {AGENT_STAGE}  ({AGENT_LABEL})")
     print(f"boot {BOOT_REVISION}", flush=True)
     print(

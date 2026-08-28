@@ -42,6 +42,31 @@ class PacketTests(unittest.TestCase):
         body = pkt[2:-1]
         self.assertEqual(pkt[-1], (~sum(body)) & 0xFF)
 
+    def test_ping_packet_is_instruction_one(self) -> None:
+        from feetech_bus import INST_PING
+
+        pkt = build_packet(3, INST_PING)
+        self.assertEqual(pkt[2], 3)
+        self.assertEqual(pkt[4], INST_PING)
+
+    def test_probe_servos_missing_port(self) -> None:
+        from feetech_bus import probe_servos
+
+        with self.assertRaises(FileNotFoundError):
+            probe_servos("/dev/lelamp-missing-acm0")
+
+    def test_format_probe_report_counts_ok(self) -> None:
+        from feetech_bus import format_probe_report
+
+        rows = [
+            {"id": 1, "name": "base_yaw", "ok": True, "degrees": 0.0, "detail": ""},
+            {"id": 2, "name": "base_pitch", "ok": False, "degrees": None, "detail": "timeout"},
+        ]
+        text = format_probe_report("STS3215 /dev/ttyACM0 baud=1000000", rows)
+        self.assertIn("1/2", text)
+        self.assertIn("base_pitch", text)
+        self.assertIn("无应答", text)
+
     def test_split_status_roundtrip_shape(self) -> None:
         # Fake a 2-byte present-position reply for id=1, error=0, ticks=2048.
         params = bytes([2048 & 0xFF, (2048 >> 8) & 0xFF])
