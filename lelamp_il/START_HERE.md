@@ -186,7 +186,9 @@ meta.json
 
 ## 第 5 件事：接回中文指令（不替换音乐和动画）
 
-先单独试策略 6 秒，确认灯会转头：
+「看我 / 看着我 / 看过来」会**一直跟着**画面里的人/手，直到你说「停 / 好了 / 别看了」，或再说点头、放音乐、关灯。不是播 6 秒动画。「点头 / 摇头 / 开心」继续 canned 动画；「放音乐 / 大声一点」继续音乐。不要另接一套 LiveKit agent。
+
+单独试策略仍可用固定步数（确认灯会转头）：
 
 ```bash
 # 语音仍要停着
@@ -201,8 +203,6 @@ scp artifacts/tiny_lamp_int8.onnx artifacts/meta.json pi@lamp:~/hermes-agent/lel
 # 在灯上：
 cp ~/hermes-agent/plugins/lelamp/local_main.py ~/lelamp_runtime/local_main.py
 ```
-
-「看我 / 看着我 / 看过来」走视觉策略；「点头 / 摇头 / 开心」继续 canned 动画；「放音乐 / 大声一点」继续音乐。不要另接一套 LiveKit agent。
 
 最后再开语音：
 

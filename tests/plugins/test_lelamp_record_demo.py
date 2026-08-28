@@ -37,6 +37,20 @@ def test_infer_pi_uses_record_demo_camera():
     assert "kind == \"lelamp\"" in source
 
 
+def test_agent_hook_follows_until_stop_not_fixed_six_seconds():
+    source = (ROOT / "lelamp_il" / "agent_hook.py").read_text(encoding="utf-8")
+    assert "stop_event" in source
+    assert "close_camera" in source
+    assert "seconds: float = 0.0" in source
+    assert "n_steps = max(1, int(round(seconds * control_hz)))" not in source
+    local = (
+        Path(__file__).resolve().parents[2] / "plugins" / "lelamp" / "local_main.py"
+    ).read_text(encoding="utf-8")
+    assert "Command(\"watch_person\", 6.0" not in local
+    assert "一直看着你" in local
+    assert "WATCH_STOP_SHORT" in local
+
+
 def test_infer_motor_bus_does_not_require_lerobot_calibration():
     source = (ROOT / "lelamp_il" / "infer_pi.py").read_text(encoding="utf-8")
     assert "无需 lerobot 校准" in source

@@ -21,7 +21,8 @@ Keep official ``main.py`` untouched. From the runtime repo root:
 Type Chinese commands, or with ``--listen`` speak them to the ReSpeaker.
 Say 音乐 to play a random file from the music/ folder. Say 下一首 to skip.
 Say 大点声 / 小点声 for volume, 循环播放 or 单曲循环 while a song plays.
-Say 看我 to run the trained look-at policy (not scanning/nod).
+Say 看我 to follow the person/hand in the camera until you say 停
+or 别看了 (not a 6-second clip, not scanning/nod).
 While a song plays, the RGB ring does a soft music-box wash (warm highs,
 cool lows) and the motors stay still. ``q`` or Ctrl+C quits.
 Music plays on the lamp ReSpeaker speaker by default (never HDMI).
@@ -222,6 +223,14 @@ WATCH_PERSON = {
     "看我", "看着我", "看这边", "看过来", "看一眼",
     "look at me", "watch me", "lookatme",
 }
+WATCH_STOP = {
+    "别看了", "不用看了", "看够了", "停止看我", "不要看了", "别跟着了",
+    "stop watching", "stop looking",
+}
+# Only honored while already following, so 停止音乐 still wins.
+WATCH_STOP_SHORT = {
+    "停", "停止", "停了", "好了", "别看", "不看了",
+}
 
 MUSIC_LOOP_ONE = {
     "单曲循环", "单曲重复", "这一首循环", "重复这一首",
@@ -234,7 +243,7 @@ _BUILTIN_TRACKS = (
 
 HELP_TEXT = """本地台灯 Stage 4（无 OpenAI）
 动作：你好 / 点头 / 摇头 / 好奇 / 张望 / 开心 / 兴奋 / 惊讶 / 害羞 / 难过 / 待机
-看人：看我 / 看着我 / 看过来（视觉策略，不是张望动画）
+看人：看我 / 看着我 / 看过来（一直跟着画面里的人/手；说停、好了、别看了停下）
 灯光：开灯 / 关灯 / 暖光 / 冷光 / 自动 / 亮一点 / 暗一点
 音乐：音乐 / 下一首 / 停止音乐 / 大点声 / 小点声 / 循环播放 / 单曲循环
 说话：启动时加 --listen（先 --download-vosk）
@@ -365,8 +374,10 @@ def parse_line(line: str) -> Command:
     if music_kind == "loop_one":
         return Command("music_loop", "one", "单曲循环。")
 
+    if _watch_stop_kind(text):
+        return Command("watch_stop", None, "好，不看了。")
     if _watch_kind(text):
-        return Command("watch_person", 6.0, "看着你。")
+        return Command("watch_person", 0.0, "一直看着你。说停或别看了就停。")
 
     parts = text.split()
     if parts[0].lower() == "volume" and len(parts) == 2 and parts[1].isdigit():
@@ -399,7 +410,7 @@ def parse_line(line: str) -> Command:
         return Command(
             "unknown",
             text,
-            "我还没学会这句。可以说：你好、点头、看我、暖光、关灯、音乐、下一首、大点声。输入 help 看全部。",
+            "我还没学会这句。可以说：你好、点头、看我、别看了、暖光、关灯、音乐、下一首、大点声。输入 help 看全部。",
         )
     spoken = {
         "wake_up": "你好呀，我是台灯。",
@@ -435,6 +446,7 @@ def command_phrases() -> List[str]:
         | set(MUSIC_LOOP_ALL)
         | set(MUSIC_LOOP_ONE)
         | set(WATCH_PERSON)
+        | set(WATCH_STOP)
         | set(extra)
     )
     return sorted(phrases, key=lambda item: (-len(item), item))
@@ -499,6 +511,20 @@ def _watch_kind(transcript: str) -> bool:
     low = compact.lower()
     blobs = (compact, low, (transcript or "").strip().lower())
     return _phrase_in_blobs(WATCH_PERSON, blobs)
+
+
+def _watch_stop_kind(transcript: str) -> bool:
+    compact = _compact_speech(transcript)
+    low = compact.lower()
+    blobs = (compact, low, (transcript or "").strip().lower())
+    return _phrase_in_blobs(WATCH_STOP, blobs)
+
+
+def _is_short_watch_stop(transcript: str) -> bool:
+    compact = _compact_speech(transcript)
+    if not compact:
+        return False
+    return compact in WATCH_STOP_SHORT or compact.lower() in WATCH_STOP_SHORT
 
 
 def extract_spoken_command(transcript: str) -> Optional[str]:
@@ -1449,9 +1475,17 @@ def vosk_listen_worker(
         out_q.put(f"__error__ 麦克风失败: {exc}")
 
 
+def _command_with_watch_stop(lamp: "LocalLamp", raw: str, cmd: Command) -> Command:
+    """While following, 停 / 好了 / 别看 mean stop watching."""
+    if lamp.watching and cmd.kind in {"unknown", "noop"} and _is_short_watch_stop(raw):
+        return Command("watch_stop", None, "好，不看了。")
+    return cmd
+
+
 def dispatch_text(lamp: LocalLamp, raw: str) -> str:
-    cmd = parse_line(raw)
+    cmd = _command_with_watch_stop(lamp, raw, parse_line(raw))
     if cmd.kind == "quit":
+        lamp.stop_watch_person()
         print(cmd.reply)
         return "quit"
     text = lamp.apply(cmd)
@@ -1464,10 +1498,12 @@ def apply_speech(lamp: LocalLamp, transcript: str) -> str:
     compact = _compact_speech(transcript)
     phrase = extract_spoken_command(transcript)
     raw = phrase or compact or (transcript or "").strip()
-    cmd = parse_line(raw)
+    cmd = _command_with_watch_stop(lamp, raw, parse_line(raw))
     # While a song plays the mic stays open, so lyrics become noise.
     # Drop unknown fragments quietly; real commands still go through.
     if lamp.music_playing and cmd.kind in {"unknown", "noop"}:
+        return "unknown"
+    if lamp.watching and cmd.kind in {"unknown", "noop"}:
         return "unknown"
     print(f"灯< {transcript}")
     if lamp.music_playing and cmd.kind not in {
@@ -1478,6 +1514,7 @@ def apply_speech(lamp: LocalLamp, transcript: str) -> str:
         "volume_delta",
         "volume",
         "music_loop",
+        "watch_stop",
     }:
         print("正在放歌")
         return "busy"
@@ -1486,6 +1523,8 @@ def apply_speech(lamp: LocalLamp, transcript: str) -> str:
         return "unknown"
     if phrase and phrase != compact:
         print(f"听成：{phrase}")
+    if cmd.kind == "watch_stop":
+        return dispatch_text(lamp, "别看了")
     return dispatch_text(lamp, raw)
 
 
@@ -1506,6 +1545,7 @@ def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path)
     worker.start()
     print("麦克风线程已开。请说：你好、点头、看我、关灯、音乐、下一首、大点声。打字回车也可以。")
     print("放歌时麦克风继续听：停止音乐 / 下一首 / 大点声 / 小点声 / 循环播放 / 单曲循环。")
+    print("看人时麦克风继续听：停 / 好了 / 别看了。点头、音乐、关灯也会停下跟随。")
     try:
         while True:
             try:
@@ -1641,6 +1681,9 @@ class LocalLamp:
         self.music_volume = 85
         self._loop_mode = "all"
         self.mic_hold = threading.Event()
+        self._watch_stop = threading.Event()
+        self._watch_thread = None
+        self._watch_playing = False
 
     def start(self) -> None:
         folder = ensure_music_dir()
@@ -1666,6 +1709,7 @@ class LocalLamp:
         print(f"motors on {self.port}  rgb leds={self.led_count}")
 
     def stop(self) -> None:
+        self.stop_watch_person()
         self.stop_music()
         for svc in (self.motors, self.rgb):
             if svc is None:
@@ -1708,6 +1752,10 @@ class LocalLamp:
     @property
     def music_playing(self) -> bool:
         return bool(self._music_playing)
+
+    @property
+    def watching(self) -> bool:
+        return bool(self._watch_playing)
 
     def _rebuild_playlist(self, *, shuffle: bool = True) -> List[Path]:
         root = ensure_music_dir()
@@ -1867,8 +1915,11 @@ class LocalLamp:
                 f"sim={self.sim} expression={self.last_expression or '-'} "
                 f"rgb={self.last_rgb} brightness={self.brightness} "
                 f"music={self.last_music or '-'} volume={self.music_volume} "
-                f"loop={self._loop_mode}"
+                f"loop={self._loop_mode} watch={'on' if self.watching else 'off'}"
             )
+        if cmd.kind in {"express", "music", "music_next", "music_stop", "mood", "rgb"}:
+            if self.watching:
+                self.stop_watch_person()
         if cmd.kind == "music":
             return self.play_music()
         if cmd.kind == "music_next":
@@ -1882,9 +1933,11 @@ class LocalLamp:
         if cmd.kind == "music_loop":
             return self.set_loop_mode(str(cmd.payload))
         if cmd.kind == "watch_person":
-            seconds = float(cmd.payload) if cmd.payload is not None else 6.0
-            spoken = self.watch_person(seconds)
+            spoken = self.watch_person()
             return spoken or cmd.reply
+        if cmd.kind == "watch_stop":
+            spoken = self.stop_watch_person()
+            return spoken or "没在看。"
         if cmd.kind == "express":
             rec = str(cmd.payload)
             self._play(rec)
@@ -1954,15 +2007,21 @@ class LocalLamp:
         self.motors = MotorsService(port=self.port, lamp_id=self.lamp_id, fps=30)
         self.motors.start()
 
-    def watch_person(self, seconds: float = 6.0) -> str:
-        """Run the trained look-at policy. Never falls back to scanning/nod."""
+    def watch_person(self, seconds: float = 0.0) -> str:
+        """Follow the person/hand until stop_watch_person(). Never scanning/nod."""
+        if self.watching:
+            return "已经在看了。说停或别看了就停。"
+        self.stop_music(restore=False)
         self.last_expression = "watch_person"
         self._apply_rgb(MOOD_RGB["listen"])
+        self._watch_stop.clear()
+        self._watch_playing = True
         if self.sim:
-            print(f"[sim] watch_person {seconds}s")
-            return "看着你。"
+            print("[sim] watch_person until stop")
+            return "一直看着你。说停或别看了就停。"
         _il_dir, model, meta = resolve_look_at_artifacts()
         if model is None or meta is None:
+            self._watch_playing = False
             looked = "\n".join(f"  {p}" for p in look_at_search_roots())
             print("没有 tiny_lamp_int8.onnx + meta.json。已搜索:\n" + looked)
             print("模型应放在 /home/spocklamp/hermes-agent/lelamp_il/artifacts/")
@@ -1970,22 +2029,55 @@ class LocalLamp:
             print("  uv run python local_main.py --listen")
             return "看人策略还没拷到灯上。"
         self._release_motors()
+        self._watch_thread = threading.Thread(
+            target=self._watch_loop,
+            args=(model, meta, float(seconds or 0.0)),
+            daemon=True,
+            name="lelamp-watch",
+        )
+        self._watch_thread.start()
+        return "一直看着你。说停或别看了就停。"
+
+    def _watch_loop(self, model, meta, seconds: float) -> None:
         try:
             run_watch_person = _import_run_watch_person()
-            return run_watch_person(
+            msg = run_watch_person(
                 model=model,
                 meta=meta,
                 port=self.port,
                 seconds=seconds,
+                stop_event=self._watch_stop,
             )
+            if msg:
+                print(msg)
         except Exception as exc:
             print(f"看人失败: {exc}")
-            return f"看人还没就绪：{exc}"
         finally:
+            self._watch_playing = False
             try:
-                self._reconnect_motors()
+                if self.motors is None:
+                    self._reconnect_motors()
             except Exception as exc:
                 print(f"舵机重连失败: {exc}")
+
+    def stop_watch_person(self) -> str:
+        was = self._watch_playing
+        self._watch_stop.set()
+        thread = self._watch_thread
+        self._watch_thread = None
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=3.0)
+        self._watch_playing = False
+        if not self.sim:
+            try:
+                if self.motors is None:
+                    self._reconnect_motors()
+            except Exception as exc:
+                print(f"舵机重连失败: {exc}")
+        if was:
+            print("watch stop")
+            return "好，不看了。"
+        return ""
 
     def wake(self) -> None:
         mood, bri = circadian_mood()

@@ -24,7 +24,8 @@ if str(_ROOT) not in sys.path:
 WATCH_PERSON_PROMPT = """
 看人（视觉策略，不是播放动画）：
 用户说「看我」「看着我」「看这边」「看过来」「look at me」「watch me」时，
-必须调用 watch_person，禁止用 play_recording 播 nod/scanning/curious。
+必须调用 watch_person 并一直跟着画面里的人/手，禁止用 play_recording 播 nod/scanning/curious。
+用户说「停」「停止」「好了」「别看了」或点头/放音乐/关灯时停下跟随。
 点头、摇头、开心扭、唤醒，继续用 play_recording。
 放音乐、调音量，继续用现有工具。
 用户用中文说话时，用中文简短回复。
@@ -35,16 +36,20 @@ def run_watch_person(
     model: Path,
     meta: Path,
     port: str,
-    seconds: float = 6.0,
+    seconds: float = 0.0,
     camera_index: int = 0,
+    stop_event=None,
 ) -> str:
-    """Block for `seconds` while the ONNX policy tracks the person, then return.
+    """Run the ONNX policy at control_hz until stop, or for `seconds` if > 0.
 
+    seconds <= 0 means keep following (local_main starts this in a thread and
+    sets stop_event when the user says 停 / 别看了, or issues another command).
     The LiveKit agent must not also be driving MotorsService during this call:
     pause / stop motor playback first, then resume canned animations after.
     """
     from infer_pi import (
         MotorBus,
+        close_camera,
         grab_frame,
         load_meta,
         make_session,
@@ -71,13 +76,21 @@ def run_watch_person(
     jmax = np.asarray(cfg["joint_max"], dtype=np.float32)
     names = list(cfg["joint_names"])
     period = 1.0 / max(control_hz, 1.0)
-    n_steps = max(1, int(round(seconds * control_hz)))
+    bounded = seconds is not None and float(seconds) > 0
+    n_steps = max(1, int(round(float(seconds) * control_hz))) if bounded else None
 
     sess = make_session(model)
     camera = open_camera(camera_index)
     bus = MotorBus(port, names)
+    stopped = False
     try:
-        for _ in range(n_steps):
+        step = 0
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                stopped = True
+                break
+            if bounded and step >= n_steps:
+                break
             t0 = time.perf_counter()
             frame = grab_frame(camera, image_size)
             image = preprocess_image(frame, image_size)
@@ -91,25 +104,39 @@ def run_watch_person(
             bus.write_joints(target)
             remain = period - (time.perf_counter() - t0)
             if remain > 0:
-                time.sleep(remain)
+                if stop_event is not None:
+                    if stop_event.wait(remain):
+                        stopped = True
+                        break
+                else:
+                    time.sleep(remain)
+            step += 1
     finally:
         bus.close()
-        if camera is not None and camera[0] == "cv2":
-            camera[1].release()
-        if camera is not None and camera[0] == "picamera2":
-            camera[1].stop()
-    return f"已看向画面中的人（{seconds} 秒）。"
+        close_camera(camera)
+    if stopped:
+        return "好，不看了。"
+    if bounded:
+        return f"已看向画面中的人（{float(seconds):g} 秒）。"
+    return "好，不看了。"
 
 
 if __name__ == "__main__":
     import argparse
     import sys
 
-    p = argparse.ArgumentParser(description="Run watch_person once, then exit.")
+    p = argparse.ArgumentParser(
+        description="Run watch_person. seconds<=0 follows until Ctrl-C."
+    )
     p.add_argument("--model", type=Path, default=Path("artifacts/tiny_lamp_int8.onnx"))
     p.add_argument("--meta", type=Path, default=Path("artifacts/meta.json"))
     p.add_argument("--port", default="/dev/ttyACM0")
-    p.add_argument("--seconds", type=float, default=6.0)
+    p.add_argument(
+        "--seconds",
+        type=float,
+        default=0.0,
+        help="how long to follow; 0 means until Ctrl-C",
+    )
     args = p.parse_args()
     print(run_watch_person(args.model, args.meta, args.port, args.seconds))
     sys.exit(0)

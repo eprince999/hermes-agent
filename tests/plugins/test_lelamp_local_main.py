@@ -51,6 +51,7 @@ def test_hello_is_wake_up_not_a_light_command():
 def test_watch_me_is_not_scanning_or_nod():
     cmd = parse_line("看我")
     assert cmd.kind == "watch_person"
+    assert cmd.payload == 0.0
     assert parse_line("看着我").kind == "watch_person"
     assert parse_line("看过来").kind == "watch_person"
     assert parse_line("点头").kind == "express"
@@ -103,6 +104,47 @@ def test_sim_watch_person_does_not_play_a_recording():
     assert "看着你" in out
     assert lamp.last_expression == "watch_person"
     assert lamp.last_rgb != (0, 0, 0)
+    assert lamp.watching
+
+
+def test_sim_watch_person_follows_until_spoken_stop():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    lamp.apply(parse_line("看我"))
+    assert lamp.watching
+    assert parse_line("停").kind == "unknown"
+    assert parse_line("好了").kind == "unknown"
+    assert parse_line("别看了").kind == "watch_stop"
+    assert parse_line("停止音乐").kind == "music_stop"
+    assert apply_speech(lamp, "停") == "watch_stop"
+    assert not lamp.watching
+
+
+def test_sim_watch_person_stops_when_nodding():
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    lamp.apply(parse_line("看我"))
+    assert lamp.watching
+    out = lamp.apply(parse_line("点头"))
+    assert "好的" in out
+    assert not lamp.watching
+    assert lamp.last_expression == "nod"
+
+
+def test_extract_stop_watching_phrase():
+    spoken = extract_spoken_command("请别看了")
+    assert spoken
+    assert parse_line(spoken).kind == "watch_stop"
 
 
 def test_off_is_light_only_not_headshake():
