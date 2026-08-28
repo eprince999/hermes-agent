@@ -1,9 +1,8 @@
-# Laptop training (Python 3.10+).
-# 灯上录制只要 pillow，见 requirements-record.txt。不要在树莓派上装本文件。
-# 录制还需要摄像头（笔记本 USB 摄像头或树莓派 picamera2）
-# opencv-python-headless>=4.8,<5
+# Laptop / Mac 训练（Python 3.10+）。不要在树莓派上 pip install 本文件。
+# torch 走官方 wheel（Apple Silicon 会带 MPS）。不要装 CUDA 版。
 
 numpy>=1.26,<3
 pillow>=10,<12
+torch>=2.2,<3
 onnx>=1.16,<2
 onnxruntime>=1.18,<2

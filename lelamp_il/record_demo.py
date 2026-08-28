@@ -1000,9 +1000,11 @@ def main(argv: list[str] | None = None) -> int:
     print("=" * 60)
     print(f"录完 {kept} 段，存在 {task_dir}")
     if kept:
-        print("下一步训练:")
+        print("不要在这台灯上训练。用 FileZilla/SFTP 把下面目录拷到 Mac：")
+        print(f"  {task_dir}")
+        print("Mac 上：")
         print(
-            f"  python train.py --data {task_dir} --epochs 40 --export ./artifacts"
+            "  python train.py --data ./look_at_person --epochs 40 --export ./artifacts"
         )
     else:
         print("没有留下任何段。")

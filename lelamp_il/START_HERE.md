@@ -103,20 +103,84 @@ bash ~/hermes-agent/lelamp_il/record_on_lamp.sh --episodes 50
 
 ---
 
-## 第 4 件事：笔记本训练
+## 第 4 件事：Mac 上训练（用 FileZilla 拷数据）
 
-把 `data/look_at_person/` 拷回笔记本（灯上默认在 runtime 下）：
+**不要在灯上跑 `train.py`，也不要在灯上 `pip install` 这份 requirements。**
 
-```bash
-scp -r spocklamp@raspberrypi:~/lelamp_runtime/data/look_at_person ./data/
-python train.py --data ./data/look_at_person --epochs 40 --export ./artifacts
+### 4.1 FileZilla 从灯拷示教
+
+1. 协议选 **SFTP**（不是 FTP），端口 **22**
+2. 主机：灯的地址（常见是 `raspberrypi.local` 或你平时 SSH 用的 IP）
+3. 用户名：`spocklamp`
+4. 连上后进入远程目录：
+
+```
+/home/spocklamp/lelamp_runtime/data/look_at_person
 ```
 
-再把模型拷回灯：
+5. 把整个 `look_at_person` 文件夹拖到 Mac，例如放到：
+
+```
+~/lelamp_data/look_at_person
+```
+
+同时把训练脚本也拷下来（若 Mac 上还没有这份仓库）：
+
+```
+/home/spocklamp/hermes-agent/lelamp_il
+```
+
+拖到 Mac 后应能看到 `train.py`、`requirements-train.txt`。
+
+拷完后在 Mac 终端检查，`rgb` 必须一起过来（只拷了 `joints.csv` 会训成「不看图」的策略）：
 
 ```bash
-scp artifacts/tiny_lamp_int8.onnx artifacts/meta.json pi@lamp:~/lelamp/lelamp_il/artifacts/
+ls ~/lelamp_data/look_at_person | wc -l
+# 大约几十个 ep_xxx
+
+ls ~/lelamp_data/look_at_person/ep_000/rgb | wc -l
+# 每一段大约 180 张 jpg
 ```
+
+### 4.2 在 Mac 上建训练环境并开训
+
+```bash
+cd ~/lelamp_il          # 改成你放 train.py 的目录
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install -r requirements-train.txt
+
+python train.py --data ~/lelamp_data/look_at_person --epochs 40 --export ./artifacts
+```
+
+`device=auto` 时 Apple Silicon 会走 MPS。看到 `vision=True` 才对。`val_l1` 降到大约几度就可以用。
+
+产物在 `./artifacts/`：
+
+| 文件 | 干什么 |
+|------|--------|
+| `tiny_lamp_int8.onnx` | **拷回灯** |
+| `meta.json` | **拷回灯**（关节归一化） |
+| `tiny_lamp.onnx` | 备用 FP32 |
+| `best.pt` | 留在 Mac，以后继续训 |
+
+### 4.3 FileZilla 把模型传回灯
+
+在灯上建目录（SSH 或 FileZilla 新建均可）：
+
+```
+/home/spocklamp/hermes-agent/lelamp_il/artifacts/
+```
+
+上传这两个文件（必须一对）：
+
+```
+tiny_lamp_int8.onnx
+meta.json
+```
+
+灯上的 `local_main.py` 会在 `~/hermes-agent/lelamp_il/artifacts/` 找到它们。说「看我」之前语音可以再开；先单独试策略时仍建议停着语音，避免抢串口。
 
 ---
 
