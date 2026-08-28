@@ -74,6 +74,13 @@ def grab_frame(camera, image_size: int) -> Image.Image:
         return Image.new("RGB", (image_size, image_size), (32, 32, 32))
     kind = camera[0]
     handle = camera[1]
+    if kind == "lelamp":
+        frame = handle.grab()
+        if isinstance(frame, (bytes, bytearray)):
+            from io import BytesIO
+
+            return Image.open(BytesIO(frame)).convert("RGB")
+        return frame.convert("RGB")
     if kind == "picamera2":
         arr = handle.capture_array()
         return Image.fromarray(arr)
@@ -87,6 +94,15 @@ def grab_frame(camera, image_size: int) -> Image.Image:
 
 
 def open_camera(index: int):
+    """Prefer the same rpicam-vid path as record_demo.py (CSI must not use OpenCV)."""
+    try:
+        from record_demo import PiOrWebcam
+
+        cam = PiOrWebcam(index, 320, 240)
+        print("   ", cam.connect(), flush=True)
+        return ("lelamp", cam)
+    except Exception as exc:
+        print(f"record_demo camera failed ({exc}); trying picamera2/OpenCV", flush=True)
     try:
         from picamera2 import Picamera2
 
@@ -108,6 +124,21 @@ def open_camera(index: int):
         return ("cv2", cap)
     except Exception:
         return None
+
+
+def close_camera(camera) -> None:
+    if camera is None:
+        return
+    kind, handle = camera[0], camera[1]
+    if kind == "lelamp":
+        handle.close()
+    elif kind == "cv2":
+        handle.release()
+    elif kind == "picamera2":
+        stop = getattr(handle, "stop", None)
+        if callable(stop):
+            stop()
+
 
 
 class MotorBus:
@@ -266,10 +297,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\nstop")
     finally:
         bus.close()
-        if camera is not None and camera[0] == "cv2":
-            camera[1].release()
-        if camera is not None and camera[0] == "picamera2":
-            camera[1].stop()
+        close_camera(camera)
     return 0
 
 

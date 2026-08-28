@@ -19,7 +19,12 @@ def _il_path() -> str:
     return str(ROOT / "lelamp_il")
 
 
-def test_revision_fingerprint_is_stream_not_old_cam():
+def test_infer_pi_uses_record_demo_camera():
+    source = (ROOT / "lelamp_il" / "infer_pi.py").read_text(encoding="utf-8")
+    assert "PiOrWebcam" in source
+    assert "def close_camera" in source
+    assert "kind == \"lelamp\"" in source
+
     source = RECORD.read_text(encoding="utf-8")
     assert f'RECORD_DEMO_REVISION = "{REVISION}"' in source
     assert "MjpegLiveStream" in source
