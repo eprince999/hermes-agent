@@ -91,19 +91,15 @@ timestamp,base_yaw.pos,base_pitch.pos,elbow_pitch.pos,wrist_roll.pos,wrist_pitch
 
 必须刷 **64-bit Raspberry Pi OS Lite**。32 位没有能用的 `onnxruntime` wheel。不要装桌面，512 MB 会被 GUI 吃光。
 
+灯上**不要**再 `python3 -m venv ~/lelamp/.venv`。只用已经能转头的 `(lelamp-runtime)`：
+
 ```bash
-sudo apt update
-sudo apt install -y python3-pip python3-venv
-python3 -m venv ~/lelamp/.venv
-source ~/lelamp/.venv/bin/activate
-pip install -r requirements-pi.txt
-
-# 先不接舵机，确认模型能跑
-python infer_pi.py --model tiny_lamp_int8.onnx --meta meta.json --dry-run --steps 20
-
-# 接上 Feetech 总线（需要 LeLamp runtime / lerobot）
-python infer_pi.py --model tiny_lamp_int8.onnx --meta meta.json --port /dev/ttyUSB0
+cd ~/lelamp_runtime
+sudo uv run python ~/hermes-agent/lelamp_il/infer_pi.py \
+    --model tiny_lamp_int8.onnx --meta meta.json --port /dev/ttyACM0
 ```
+
+推理依赖（onnxruntime 等）装进**这一个**官方环境，不要另开 venv。训练仍然只在笔记本。
 
 CSI 摄像头会优先走 `picamera2`，否则用 OpenCV。`--execute-chunk 1` 表示每步只用预测轨迹的第一拍再重新推理，闭环更稳。
 

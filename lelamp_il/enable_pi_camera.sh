@@ -18,8 +18,7 @@ CFG=""
 for candidate in \
   "${VIRTUAL_ENV:-}/pyvenv.cfg" \
   "$HOME/lelamp_runtime/.venv/pyvenv.cfg" \
-  "$HOME/lelamp_runtime/venv/pyvenv.cfg" \
-  "$HOME/lelamp/.venv/pyvenv.cfg"
+  "$HOME/lelamp_runtime/venv/pyvenv.cfg"
 do
   if [ -n "${candidate}" ] && [ -f "${candidate}" ]; then
     CFG="${candidate}"
@@ -47,6 +46,6 @@ echo "  deactivate"
 echo "  source ~/lelamp_runtime/.venv/bin/activate   # 路径按你机器改"
 echo "  python3 -c \"from picamera2 import Picamera2; print('venv picamera2 ok')\""
 echo
-echo "然后再录："
-echo "  cd ~/hermes-agent/lelamp_il"
-echo "  python record_demo.py --task look_at_person --port /dev/ttyACM0 --id lelamp --episodes 2 --seconds 6"
+echo "然后再录（只用官方环境，不要另开 venv）："
+echo "  cd ~/lelamp_runtime"
+echo "  sudo uv run python ~/hermes-agent/lelamp_il/record_demo.py --task look_at_person --port /dev/ttyACM0 --id lelamp --episodes 2 --seconds 6"

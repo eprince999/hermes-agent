@@ -35,77 +35,42 @@ sudo fuser /dev/ttyACM0 /dev/ttyUSB0 2>/dev/null || true
 
 ---
 
-## 第 2 件事：在灯上录制（不要装 PyTorch）
+## 第 2 件事：灯上只留一个环境 `(lelamp-runtime)`
 
-灯上**禁止** `pip install -r requirements-train.txt`。那会下载 400MB+ 的 torch，SD 卡会满。
+灯上**禁止** `pip install -r requirements-train.txt`，也**禁止**再 `python3 -m venv`。  
+只保留官方 `~/lelamp_runtime/.venv`（提示符里的 `(lelamp-runtime)`）。训练在笔记本做。
 
-用灯上**已经能做动作的** `lelamp_runtime` 虚拟环境，只补 pillow：
+先删掉误建的环境：
 
 ```bash
-# 先清掉误装的环境（若刚把盘装爆）
-rm -rf ~/hermes-agent/lelamp_il/.venv
-rm -rf ~/.cache/pip
+cd ~/hermes-agent
+git pull
+bash lelamp_il/keep_only_runtime_venv.sh
+```
 
-# 换成官方 runtime 的环境（路径按你机器上实际位置改）
-source ~/lelamp_runtime/.venv/bin/activate   # 或 venv/
-python3 -m pip install pillow
+录制永远从 runtime 启动，不要 `source` 别的 venv：
+
+```bash
+cd ~/lelamp_runtime
+sudo uv run python ~/hermes-agent/lelamp_il/record_demo.py --task look_at_person \
+    --port /dev/ttyACM0 --id lelamp --episodes 2 --seconds 6
 ```
 
 **Camera Module 3 必须用系统 `picamera2`，不能 `pip install picamera2`。**  
-`(lelamp-runtime)` 是隔离虚拟环境：系统没装包，或 venv 看不见系统包，都会报 `No module named 'picamera2'`。`dpkg -l ... | grep ^ii` 没有输出 = 系统包也没装。
-
-在灯上跑一次（会改 apt 为 IPv4，避免之前的 Debian IPv6 404）：
+若 `(lelamp-runtime)` 里 `import picamera2` 失败，跑一次（只改官方这个 venv）：
 
 ```bash
-# 先 git pull 拿到脚本，然后：
 cd ~/hermes-agent/lelamp_il
 bash enable_pi_camera.sh
 ```
 
-或手动做同样的事：
-
-```bash
-echo 'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99force-ipv4
-sudo apt-get update
-sudo apt-get install -y python3-picamera2 python3-libcamera
-/usr/bin/python3 -c "from picamera2 import Picamera2; print('system picamera2 ok')"
-
-# 让官方 runtime 的 venv 能 import 系统包
-sed -i 's/^include-system-site-packages = .*/include-system-site-packages = true/' \
-  ~/lelamp_runtime/.venv/pyvenv.cfg
-# 若文件在 venv/ 而不是 .venv/，改路径后再跑一次 sed
-
-deactivate
-source ~/lelamp_runtime/.venv/bin/activate
-python3 -c "from picamera2 import Picamera2; print('venv picamera2 ok')"
-```
-
-确认启动时打印 ``revision 2026-08-28-raw-sts``。如果没有这一行，灯上还是旧文件，需要：
+启动时必须看到 `revision 2026-08-28-raw-sts`。没有这一行就还是旧文件：
 
 ```bash
 cd ~/hermes-agent
 git fetch origin cursor/lelamp-zero2w-train-36b0
 git checkout cursor/lelamp-zero2w-train-36b0
 git pull origin cursor/lelamp-zero2w-train-36b0
-```
-
-当前这个 Python 如果报 `No module named 'lerobot'`，说明你没用灯已经能转头的那个解释器。优先：
-
-```bash
-# 语音已停
-cd ~/lelamp_runtime
-sudo uv run python ~/hermes-agent/lelamp_il/record_demo.py --task look_at_person \
-    --port /dev/ttyACM0 --id lelamp --episodes 2 --seconds 6
-```
-
-`uv run` 就是日常点头/放歌用的环境。新脚本即使没有 `lelamp`/`lerobot` 也会用纯串口读 STS3215。不要 `--dummy`，不要 pip install lerobot。
-
-或在已激活的 runtime venv 里：
-
-```bash
-cd ~/hermes-agent/lelamp_il
-python record_demo.py --task look_at_person --port /dev/ttyACM0 --id lelamp \
-    --episodes 2 --seconds 6
 ```
 
 ---
