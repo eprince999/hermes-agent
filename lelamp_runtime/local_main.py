@@ -88,6 +88,9 @@ SERVO_SETTLE_SECONDS = 1.0
 DEFAULT_MUSIC_VOLUME = 100
 # mpg123 --scale at 100%. ALSA stays ≤100%; this is extra software gain.
 SPEAKER_SOFTWARE_GAIN = 4.0
+# After the wake_up recording finishes, fade the head light to this percent.
+WAKE_END_BRIGHTNESS = 80
+WAKE_FADE_SECONDS = 1.2
 
 
 def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = None) -> Path:
@@ -2415,6 +2418,33 @@ class LocalLamp:
             print(f"[no motors] play {recording}", flush=True)
             return
         self.motors.dispatch("play", recording)
+        if wait:
+            self._wait_play_idle()
+
+    def _wait_play_idle(self, timeout: float = 25.0) -> None:
+        """MotorsService.dispatch is async; wait until the CSV actually ends."""
+        if self.sim or self.motors is None:
+            return
+        wait_idle = getattr(self.motors, "wait_until_idle", None)
+        if callable(wait_idle):
+            wait_idle(timeout=timeout)
+
+    def fade_brightness_to(self, target: int, *, seconds: float = WAKE_FADE_SECONDS) -> None:
+        """Ramp brightness while keeping the current mood color."""
+        start = int(self.brightness)
+        end = max(0, min(100, int(target)))
+        if self.sim or start == end:
+            self.brightness = end
+            self._apply_rgb(self.base_rgb)
+            return
+        steps = max(8, int(round(max(0.05, float(seconds)) * 12)))
+        delay = max(0.05, float(seconds)) / steps
+        for i in range(1, steps + 1):
+            self.brightness = int(round(start + (end - start) * (i / steps)))
+            self._paint_rgb(self.base_rgb, quiet=True)
+            time.sleep(delay)
+        self.brightness = end
+        self._apply_rgb(self.base_rgb)
 
     def _apply_rgb(self, rgb: Tuple[int, int, int]) -> None:
         self.base_rgb = rgb
@@ -2628,6 +2658,8 @@ class LocalLamp:
             rec = str(cmd.payload)
             self._play(rec)
             self._apply_rgb(EXPRESSION_RGB[rec])
+            if rec == "wake_up":
+                self.fade_brightness_to(WAKE_END_BRIGHTNESS)
             return cmd.reply
         if cmd.kind == "mood":
             mood = str(cmd.payload)
@@ -2796,7 +2828,11 @@ class LocalLamp:
         self.brightness = bri
         self._apply_rgb(MOOD_RGB[mood])
         self._play("wake_up")
-        print(f"台灯醒了。现在 {mood} 光，亮度 {self.brightness}%。输入 help 看命令。")
+        self.fade_brightness_to(WAKE_END_BRIGHTNESS)
+        print(
+            f"台灯醒了。现在 {mood} 光，亮度 {self.brightness}%。输入 help 看命令。",
+            flush=True,
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:

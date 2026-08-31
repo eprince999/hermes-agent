@@ -232,7 +232,8 @@ def test_sim_express_then_off_updates_state():
     lamp.apply(parse_line("关灯"))
     assert lamp.last_rgb == (0, 0, 0)
     lamp.apply(parse_line("亮一点"))
-    assert lamp.brightness == 85
+    # 你好 / wake_up ends at 80%, then 亮一点 adds 15.
+    assert lamp.brightness == 95
 
 
 def test_sim_wake_is_circadian_then_wake_up():
@@ -260,12 +261,42 @@ def test_sim_wake_is_circadian_then_wake_up():
     lamp._apply_rgb = apply  # type: ignore[method-assign]
     lamp._play = play  # type: ignore[method-assign]
     lamp.wake()
-    mood, bri = circadian_mood()
-    assert order == ["rgb", "play"]
+    mood, _circadian_bri = circadian_mood()
+    assert order == ["rgb", "play", "rgb"]
     assert lamp.last_expression == "wake_up"
-    assert lamp.brightness == bri
+    assert lamp.brightness == 80
     assert lamp.base_rgb == MOOD_RGB[mood]
-    assert lamp.last_rgb == _scale_rgb(MOOD_RGB[mood], bri)
+    assert lamp.last_rgb == _scale_rgb(MOOD_RGB[mood], 80)
+
+
+def test_sim_wake_up_fades_to_80_even_from_night(monkeypatch):
+    from plugins.lelamp import local_main
+    from plugins.lelamp.local_main import MOOD_RGB, WAKE_END_BRIGHTNESS, _scale_rgb
+
+    monkeypatch.setattr(local_main, "circadian_mood", lambda: ("night", 35))
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=35,
+    )
+    lamp.wake()
+    assert WAKE_END_BRIGHTNESS == 80
+    assert lamp.brightness == 80
+    assert lamp.base_rgb == MOOD_RGB["night"]
+    assert lamp.last_rgb == _scale_rgb(MOOD_RGB["night"], 80)
+
+    spoken = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=35,
+    )
+    spoken.apply(parse_line("你好"))
+    assert spoken.brightness == 80
+    assert spoken.last_expression == "wake_up"
 
 
 def test_stdin_is_tty_skips_dev_null(monkeypatch):
