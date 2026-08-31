@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 
@@ -327,6 +328,142 @@ def test_boot_wrapper_uses_venv_python_not_uv(tmp_path):
     assert ".venv/bin/python" in body
     assert " uv " not in body
     assert "$" not in dest.read_text(encoding="utf-8")
+    assert "HF_LEROBOT_CALIBRATION" in body
+    assert "lelamp_follower" in body
+    assert "/root/.cache/huggingface/lerobot/calibration" in body
+
+
+def _lelamp_cal_json() -> str:
+    import json
+
+    return json.dumps(
+        {
+            "base_yaw": {
+                "id": 1,
+                "drive_mode": 0,
+                "homing_offset": 0,
+                "range_min": 0,
+                "range_max": 4095,
+            },
+            "wrist_pitch": {
+                "id": 5,
+                "drive_mode": 0,
+                "homing_offset": 0,
+                "range_min": 0,
+                "range_max": 4095,
+            },
+        }
+    )
+
+
+def test_find_lerobot_calibration_uses_root_cache_when_user_home_empty(
+    tmp_path, monkeypatch
+):
+    from plugins.lelamp import local_main
+
+    root = tmp_path / "root"
+    user = tmp_path / "spocklamp"
+    fpath = (
+        root
+        / ".cache"
+        / "huggingface"
+        / "lerobot"
+        / "calibration"
+        / "robots"
+        / "lelamp_follower"
+        / "lelamp.json"
+    )
+    fpath.parent.mkdir(parents=True)
+    fpath.write_text(_lelamp_cal_json(), encoding="utf-8")
+    monkeypatch.setattr(local_main, "lerobot_calibration_homes", lambda: [user, root])
+    monkeypatch.delenv("LELAMP_CALIBRATION", raising=False)
+    found = local_main.find_lerobot_calibration_file("lelamp")
+    assert found == fpath.resolve()
+
+
+def test_apply_lerobot_calibration_env_points_hf_home_at_found_json(
+    tmp_path, monkeypatch
+):
+    from plugins.lelamp import local_main
+
+    root = tmp_path / "root"
+    fpath = (
+        root
+        / ".cache"
+        / "huggingface"
+        / "lerobot"
+        / "calibration"
+        / "robots"
+        / "lelamp_follower"
+        / "lelamp.json"
+    )
+    fpath.parent.mkdir(parents=True)
+    fpath.write_text(_lelamp_cal_json(), encoding="utf-8")
+    monkeypatch.setattr(local_main, "lerobot_calibration_homes", lambda: [root])
+    monkeypatch.delenv("HF_LEROBOT_CALIBRATION", raising=False)
+    monkeypatch.delenv("HF_LEROBOT_HOME", raising=False)
+    monkeypatch.delenv("LELAMP_CALIBRATION", raising=False)
+    found = local_main.apply_lerobot_calibration_env("lelamp")
+    assert found == fpath.resolve()
+    assert os.environ["HF_LEROBOT_CALIBRATION"].endswith("/calibration")
+    assert os.environ["HF_LEROBOT_HOME"].endswith("/lerobot")
+
+
+def test_ensure_motors_calibration_loads_json_onto_empty_bus(tmp_path, monkeypatch):
+    from plugins.lelamp import local_main
+
+    fpath = tmp_path / "lelamp.json"
+    fpath.write_text(_lelamp_cal_json(), encoding="utf-8")
+
+    class Bus:
+        calibration = {}
+
+        def read_calibration(self):
+            raise AssertionError("json exists; do not read EEPROM")
+
+    class Robot:
+        calibration = {}
+        bus = Bus()
+
+        def _load_calibration(self, path):
+            assert Path(path) == fpath
+            self.calibration = {"base_yaw": object(), "wrist_pitch": object()}
+
+    class Svc:
+        robot = Robot()
+
+    svc = Svc()
+    monkeypatch.setattr(
+        local_main, "find_lerobot_calibration_file", lambda lamp_id: fpath
+    )
+    assert local_main.ensure_motors_calibration(svc, "lelamp") is True
+    assert svc.robot.bus.calibration is svc.robot.calibration
+    assert "base_yaw" in svc.robot.bus.calibration
+
+
+def test_ensure_motors_calibration_reads_eeprom_when_json_missing(monkeypatch):
+    from plugins.lelamp import local_main
+
+    eeprom = {"base_yaw": object(), "wrist_pitch": object()}
+
+    class Bus:
+        calibration = {}
+
+        def read_calibration(self):
+            return eeprom
+
+    class Robot:
+        calibration = {}
+        bus = Bus()
+
+    class Svc:
+        robot = Robot()
+
+    svc = Svc()
+    monkeypatch.setattr(local_main, "find_lerobot_calibration_file", lambda lamp_id: None)
+    assert local_main.ensure_motors_calibration(svc, "lelamp") is True
+    assert svc.robot.bus.calibration is eeprom
+    assert svc.robot.calibration is eeprom
 
 
 def test_wait_for_serial_port_finds_existing_node(tmp_path):

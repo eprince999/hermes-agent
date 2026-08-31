@@ -76,7 +76,8 @@ AGENT_LABEL = "vosk listen + music folder + look-at"
 # If the lamp prints「已看向画面中的人（6.0 秒）」it is still the old runtime copy.
 WATCH_REVISION = "2026-08-28-follow"
 # Printed at boot. Match OpenDuck duck-walk.service + ~/start_duck.sh.
-BOOT_REVISION = "2026-08-31-openduck"
+# -cal: find existing LeRobot json (sudo calibrate writes /root/.cache).
+BOOT_REVISION = "2026-08-31-openduck-cal"
 # USB CDC ACM can appear after local-fs.target on a Pi Zero 2W.
 SERIAL_WAIT_SECONDS = 30.0
 # OpenDuck HWI.turn_on() waits 1s after connecting before posing.
@@ -222,6 +223,20 @@ export PYTHONUNBUFFERED=1
 export UV_NO_SYNC=1
 export UV_OFFLINE=1
 export PATH={shlex.quote(path_env)}
+# Official sudo calibrate stores json under /root/.cache.
+# This service sets HOME to the lamp user, so point LeRobot at whichever
+# cache already has lelamp_follower/*.json. Do not re-calibrate.
+for cand in \\
+  /root/.cache/huggingface/lerobot/calibration \\
+  {shlex.quote(str(home))}/.cache/huggingface/lerobot/calibration
+do
+  if ls "$cand"/robots/lelamp_follower/*.json >/dev/null 2>&1; then
+    export HF_LEROBOT_HOME="$(dirname "$cand")"
+    export HF_LEROBOT_CALIBRATION="$cand"
+    echo "calibration $cand" | tee -a "$log"
+    break
+  fi
+done
 cd {shlex.quote(str(runtime_dir))} || exit 1
 log={log}
 echo "lelamp-local-run {BOOT_REVISION}" | tee -a "$log"
@@ -1984,6 +1999,156 @@ def _effective_home() -> Path:
     return Path.home()
 
 
+def lerobot_calibration_homes() -> List[Path]:
+    """Homes that may already hold a LeLamp Feetech calibration json.
+
+    Official calibrate is ``sudo uv run -m lelamp.calibrate``, which writes
+    ``/root/.cache/huggingface/lerobot/...``. systemd then sets
+    ``HOME=/home/spocklamp``, so LeRobot looks in the empty user cache and
+    ``play`` raises ``has no calibration registered``. Search both.
+    """
+    homes: List[Path] = []
+    extra = (os.environ.get("LELAMP_CALIBRATION_HOME") or "").strip()
+    if extra:
+        homes.append(Path(extra).expanduser())
+    sudo_user = (os.environ.get("SUDO_USER") or "").strip()
+    if sudo_user and sudo_user != "root":
+        try:
+            homes.append(Path(pwd.getpwnam(sudo_user).pw_dir))
+        except KeyError:
+            homes.append(Path("/home") / sudo_user)
+    for raw in (Path.home(), _effective_home(), Path("/root"), Path("/home/spocklamp")):
+        homes.append(raw)
+    seen: List[Path] = []
+    for home in homes:
+        if home and home not in seen:
+            seen.append(home)
+    return seen
+
+
+def _looks_like_lelamp_calibration(path: Path) -> bool:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and "base_yaw" in data and "wrist_pitch" in data
+
+
+def find_lerobot_calibration_file(lamp_id: str = "lelamp") -> Optional[Path]:
+    """Return an existing LeLamp calibration json. Never create a new one."""
+    pinned = (os.environ.get("LELAMP_CALIBRATION") or "").strip()
+    if pinned:
+        path = Path(pinned).expanduser()
+        if path.is_file() and _looks_like_lelamp_calibration(path):
+            return path
+    names: List[str] = []
+    for name in (lamp_id, "lelamp"):
+        if name and name not in names:
+            names.append(name)
+    exact: List[Path] = []
+    fuzzy: List[Path] = []
+    for home in lerobot_calibration_homes():
+        cache = home / ".cache" / "huggingface" / "lerobot"
+        cal_root = cache / "calibration"
+        for robot_name in ("lelamp_follower", "le_lamp_follower"):
+            folder = cal_root / "robots" / robot_name
+            for name in names:
+                candidate = folder / f"{name}.json"
+                if candidate.is_file() and _looks_like_lelamp_calibration(candidate):
+                    exact.append(candidate)
+        if cal_root.is_dir():
+            try:
+                matches = list(cal_root.rglob("*.json"))
+            except OSError:
+                matches = []
+            for candidate in matches:
+                if _looks_like_lelamp_calibration(candidate):
+                    fuzzy.append(candidate)
+    seen: List[Path] = []
+    for path in exact + fuzzy:
+        resolved = path.resolve()
+        if resolved not in seen:
+            seen.append(resolved)
+    return seen[0] if seen else None
+
+
+def apply_lerobot_calibration_env(lamp_id: str = "lelamp") -> Optional[Path]:
+    """Set HF_LEROBOT_* so LeLampFollower.__init__ can load the existing json.
+
+    Must run before ``import MotorsService`` / lerobot if those constants
+    still read the environment at import time.
+    """
+    fpath = find_lerobot_calibration_file(lamp_id)
+    if fpath is None:
+        return None
+    for parent in fpath.parents:
+        if parent.name == "calibration":
+            os.environ["HF_LEROBOT_CALIBRATION"] = str(parent)
+            if parent.parent.name == "lerobot":
+                os.environ["HF_LEROBOT_HOME"] = str(parent.parent)
+            break
+    print(f"calibration file {fpath}", flush=True)
+    return fpath
+
+
+def ensure_motors_calibration(svc: object, lamp_id: str = "lelamp") -> bool:
+    """Put existing calibration onto the Feetech bus. Do not run calibrate()."""
+    robot = getattr(svc, "robot", None)
+    if robot is None:
+        return False
+    bus = getattr(robot, "bus", None)
+
+    def _has_cal(obj: object) -> bool:
+        return bool(getattr(obj, "calibration", None))
+
+    if bus is not None and _has_cal(bus):
+        print("calibration already on bus", flush=True)
+        return True
+    if _has_cal(robot) and bus is not None:
+        bus.calibration = robot.calibration
+        print("calibration copied robot → bus", flush=True)
+        return True
+
+    fpath = find_lerobot_calibration_file(lamp_id)
+    if fpath is not None:
+        load = getattr(robot, "_load_calibration", None)
+        try:
+            if callable(load):
+                load(fpath)
+            if _has_cal(robot) and bus is not None:
+                bus.calibration = robot.calibration
+            if bus is not None and _has_cal(bus):
+                print(f"calibration loaded {fpath}", flush=True)
+                return True
+        except Exception as exc:
+            print(f"calibration json 读失败 {fpath}: {exc}", flush=True)
+
+    read = getattr(bus, "read_calibration", None) if bus is not None else None
+    if callable(read):
+        try:
+            cal = read()
+            if cal:
+                bus.calibration = cal
+                robot.calibration = cal
+                print(
+                    "calibration from motor EEPROM（当前 HOME 下没有 json）",
+                    flush=True,
+                )
+                return True
+        except Exception as exc:
+            print(f"calibration EEPROM 读失败: {exc}", flush=True)
+
+    looked = "\n".join(f"  {home}" for home in lerobot_calibration_homes())
+    print(
+        "has no calibration registered。舵机已连上，只是校准 json 不在当前 HOME。\n"
+        "官方 sudo calibrate 写到 /root/.cache/huggingface/lerobot/，\n"
+        "开机服务 HOME 是用户目录。不要重新 calibrate。已找过:\n"
+        f"{looked}",
+        flush=True,
+    )
+    return False
+
+
 def look_at_search_roots() -> List[Path]:
     here = Path(__file__).resolve().parent
     home = _effective_home()
@@ -2132,6 +2297,7 @@ class LocalLamp:
 
     def _try_start_motors(self) -> None:
         """OpenDuck: wait for the bus, then claim it. Retry — do not give up."""
+        apply_lerobot_calibration_env(self.lamp_id)
         from lelamp.service.motors.motors_service import MotorsService
 
         wait_for_serial_port(self.port)
@@ -2165,6 +2331,7 @@ class LocalLamp:
                 time.sleep(1.5)
                 continue
             self.motors = svc
+            ensure_motors_calibration(svc, self.lamp_id)
             if SERVO_SETTLE_SECONDS > 0:
                 print(
                     f"舵机就绪，等 {SERVO_SETTLE_SECONDS:.0f}s 再醒来（OpenDuck turn_on）",
@@ -2472,6 +2639,7 @@ class LocalLamp:
     def _reconnect_motors(self) -> None:
         if self.sim or self.motors is not None:
             return
+        apply_lerobot_calibration_env(self.lamp_id)
         from lelamp.service.motors.motors_service import MotorsService
 
         holders = serial_port_users(self.port)
@@ -2482,6 +2650,7 @@ class LocalLamp:
             )
         svc = MotorsService(port=self.port, lamp_id=self.lamp_id, fps=30)
         svc.start()
+        ensure_motors_calibration(svc, self.lamp_id)
         self.motors = svc
 
     def _ensure_motors(self) -> bool:
