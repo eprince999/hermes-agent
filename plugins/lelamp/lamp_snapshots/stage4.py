@@ -87,7 +87,9 @@ SERVO_SETTLE_SECONDS = 1.0
 # ReSpeaker 2-Mics speaker is tiny; 85% ALSA still sounds quiet.
 DEFAULT_MUSIC_VOLUME = 100
 # mpg123 --scale at 100%. ALSA stays ≤100%; this is extra software gain.
-SPEAKER_SOFTWARE_GAIN = 2.5
+# mpg123 -f/--scale is a long int (32768 = unity). 2.50 makes it exit 1.
+SPEAKER_SOFTWARE_GAIN = 2
+MPG123_UNITY_SCALE = 32768
 
 
 def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = None) -> Path:
@@ -1324,9 +1326,14 @@ def unmute_alsa_card(card: Optional[str]) -> None:
 
 
 def mpg123_scale(percent: int) -> float:
-    """Software gain for the tiny ReSpeaker speaker. 100% → SPEAKER_SOFTWARE_GAIN."""
+    """Software gain multiplier for logs. 100% → SPEAKER_SOFTWARE_GAIN."""
     pct = max(0, min(100, int(percent))) / 100.0
     return round(pct * SPEAKER_SOFTWARE_GAIN, 2)
+
+
+def mpg123_outscale(percent: int) -> int:
+    """Integer for mpg123 --scale. 32768 is unity; 2× gain is 65536."""
+    return int(round(MPG123_UNITY_SCALE * mpg123_scale(percent)))
 
 
 _LAST_PLAYBACK: Dict[str, Optional[str]] = {"device": None, "card": None, "backend": "alsa"}
@@ -1426,7 +1433,7 @@ def music_player_commands(
         if suffix in {".mp3", ".mp2"} and mpg:
             pulse_args = ["-q", "-o", "pulse"]
             if Path(mpg).name == "mpg123":
-                pulse_args.extend(["--scale", f"{mpg123_scale(volume):.2f}"])
+                pulse_args.extend(["--scale", str(mpg123_outscale(volume))])
             pulse_args.append(path_s)
             add(mpg, pulse_args)
         if suffix == ".wav":
@@ -1475,7 +1482,7 @@ def music_player_commands(
     if suffix in {".mp3", ".mp2"} and mpg:
         mpg_args = ["-q", "-o", "alsa"]
         if Path(mpg).name == "mpg123":
-            mpg_args.extend(["--scale", f"{mpg123_scale(volume):.2f}"])
+            mpg_args.extend(["--scale", str(mpg123_outscale(volume))])
         if device:
             mpg_args.extend(["-a", device])
         mpg_args.append(path_s)
