@@ -1285,6 +1285,35 @@ def find_alsa_playback() -> Tuple[Optional[str], Optional[str]]:
     return parse_alsa_playback(listing)
 
 
+def alsa_playback_device_candidates(
+    device: Optional[str],
+    card: Optional[str] = None,
+) -> List[str]:
+    """Playback names to try. dmix first so Vosk can keep the capture stream.
+
+    ``plughw:N,0`` is exclusive on seeed2micvoicec. mpg123 holding it makes
+    ``stream.start()`` fail and the lamp stops hearing 停止音乐 / 下一首.
+    """
+    found: List[str] = []
+
+    def add(name: Optional[str]) -> None:
+        raw = (name or "").strip()
+        if raw and raw not in found:
+            found.append(raw)
+
+    if card is not None and str(card).strip() != "":
+        add(f"plug:dmix:CARD={card},DEV=0")
+        add(f"dmix:CARD={card},DEV=0")
+    if device:
+        if device.startswith("plughw:") or device.startswith("hw:"):
+            spec = device.split(":", 1)[1]
+            card_part = spec.split(",", 1)[0]
+            add(f"plug:dmix:{card_part}")
+            add(f"dmix:{card_part}")
+        add(device)
+    return found
+
+
 def set_alsa_playback_volume(card: Optional[str], percent: int) -> None:
     amixer = _bin("amixer")
     if not amixer or card is None or card == "":
@@ -1418,6 +1447,7 @@ def music_player_commands(
     path: Path,
     *,
     device: Optional[str] = None,
+    card: Optional[str] = None,
     backend: str = "alsa",
     volume: int = DEFAULT_MUSIC_VOLUME,
 ) -> List[List[str]]:
@@ -1473,24 +1503,29 @@ def music_player_commands(
 
     aplay = _bin("aplay")
     ffmpeg = _bin("ffmpeg")
+    play_devs = alsa_playback_device_candidates(device, card)
+    if not play_devs and device:
+        play_devs = [device]
     if suffix == ".wav":
         if aplay:
-            wav = ["-q"]
-            if device:
-                wav.extend(["-D", device])
-            wav.append(path_s)
-            add(aplay, wav)
+            for dev in play_devs:
+                wav = ["-q"]
+                if dev:
+                    wav.extend(["-D", dev])
+                wav.append(path_s)
+                add(aplay, wav)
         add(_bin("paplay"), [path_s])
 
     mpg = _bin("mpg123") or _bin("mpg321")
     if suffix in {".mp3", ".mp2"} and mpg:
-        mpg_args = ["-q", "-o", "alsa"]
-        if Path(mpg).name == "mpg123":
-            mpg_args.extend(["--scale", str(mpg123_outscale(volume))])
-        if device:
-            mpg_args.extend(["-a", device])
-        mpg_args.extend(["--", path_s])
-        add(mpg, mpg_args)
+        for dev in play_devs or [None]:
+            mpg_args = ["-q", "-o", "alsa"]
+            if Path(mpg).name == "mpg123":
+                mpg_args.extend(["--scale", str(mpg123_outscale(volume))])
+            if dev:
+                mpg_args.extend(["-a", dev])
+            mpg_args.extend(["--", path_s])
+            add(mpg, mpg_args)
 
     ffplay = _bin("ffplay")
     if ffplay:
@@ -1537,6 +1572,14 @@ def music_player_commands(
     return commands
 
 
+def _drain_pipe(pipe: Optional[object]) -> None:
+    try:
+        if pipe is not None:
+            pipe.read()  # type: ignore[union-attr]
+    except Exception:
+        pass
+
+
 def _spawn_player(argv: Sequence[str], *, env: Dict[str, str]) -> Optional["subprocess.Popen[bytes]"]:
     try:
         proc = subprocess.Popen(
@@ -1564,6 +1607,13 @@ def _spawn_player(argv: Sequence[str], *, env: Dict[str, str]) -> Optional["subp
         extra = f"  {detail}" if detail else ""
         print(f"player fail {shown} exit={proc.returncode}{extra}", flush=True)
         return None
+    if proc.stderr is not None:
+        threading.Thread(
+            target=_drain_pipe,
+            args=(proc.stderr,),
+            daemon=True,
+            name="lelamp-player-err",
+        ).start()
     return proc
 
 
@@ -1744,11 +1794,11 @@ def start_music_player(
         return None
     apply_playback_volume(volume)
     for argv in music_player_commands(
-        path, device=device, backend=backend, volume=volume
+        path, device=device, card=card, backend=backend, volume=volume
     ):
         proc = _spawn_player(argv, env=env)
         if proc is not None:
-            print(f"player {' '.join(argv[:1])}")
+            print(f"player {' '.join(argv[:8])}", flush=True)
             return proc
     pygame_proc = _spawn_pygame_player(
         path, device=device, card=card, env=env, backend=backend
@@ -1864,32 +1914,31 @@ def vosk_listen_worker(
         rec.SetWords(True)
         index = find_input_device(device)
         wanted = _input_channel_count(index)
-        stream = None
-        channels = wanted
-        last_exc: Optional[BaseException] = None
-        seen_channels = set()
-        for channels in (wanted, 1, 2):
-            if channels in seen_channels:
-                continue
-            seen_channels.add(channels)
-            print(f"打开麦克风 index={index} channels={channels} rate=16000 …")
-            try:
-                stream = sd.RawInputStream(
-                    samplerate=16000,
-                    blocksize=4000,
-                    device=index,
-                    dtype="int16",
-                    channels=channels,
-                )
-                stream.start()
-                last_exc = None
-                break
-            except Exception as exc:
-                last_exc = exc
-                print(f"channels={channels} 打不开: {exc}")
-                stream = None
-        if stream is None:
+
+        def open_capture():
+            last_exc: Optional[BaseException] = None
+            seen_channels = set()
+            for ch in (wanted, 1, 2):
+                if ch in seen_channels:
+                    continue
+                seen_channels.add(ch)
+                print(f"打开麦克风 index={index} channels={ch} rate=16000 …")
+                try:
+                    st = sd.RawInputStream(
+                        samplerate=16000,
+                        blocksize=4000,
+                        device=index,
+                        dtype="int16",
+                        channels=ch,
+                    )
+                    st.start()
+                    return st, ch
+                except Exception as exc:
+                    last_exc = exc
+                    print(f"channels={ch} 打不开: {exc}")
             raise last_exc or RuntimeError("麦克风打不开")
+
+        stream, channels = open_capture()
         try:
             print("麦克风流已开")
             out_q.put("__ready__")
@@ -1907,10 +1956,35 @@ def vosk_listen_worker(
                         stream.start()
                         print("麦克风收回")
                     except Exception as exc:
-                        print(f"麦克风收回失败: {exc}")
+                        print(f"麦克风收回失败: {exc}，重开")
+                        try:
+                            stream.close()
+                        except Exception:
+                            pass
+                        try:
+                            stream, channels = open_capture()
+                            print("麦克风重开")
+                        except Exception as exc2:
+                            print(f"麦克风重开失败: {exc2}")
+                            time.sleep(0.4)
                     last_partial = ""
                     continue
-                data, _overflow = stream.read(4000)
+                try:
+                    data, _overflow = stream.read(4000)
+                except Exception as exc:
+                    print(f"麦克风读失败: {exc}，重开")
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+                    try:
+                        stream, channels = open_capture()
+                        print("麦克风重开")
+                    except Exception as exc2:
+                        print(f"麦克风重开失败: {exc2}")
+                        time.sleep(0.4)
+                    last_partial = ""
+                    continue
                 chunk = _downmix_pcm16(bytes(data), channels)
                 if rec.AcceptWaveform(chunk):
                     payload = json.loads(rec.Result())
@@ -2542,7 +2616,9 @@ class LocalLamp:
         """
         proc = start_music_player(path, volume=self.music_volume)
         if proc is not None:
+            print("喇叭开着，麦克风继续听", flush=True)
             return proc
+        print("喇叭第一次没打开，麦克风只让一下再收回（不会整首歌闭嘴）", flush=True)
         self._hold_mic()
         try:
             proc = start_music_player(path, volume=self.music_volume)
