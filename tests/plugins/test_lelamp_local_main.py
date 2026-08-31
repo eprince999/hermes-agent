@@ -13,7 +13,6 @@ from plugins.lelamp.local_main import (
     ensure_music_dir,
     extract_spoken_command,
     list_music_files,
-    music_live_phrase,
     parse_line,
     pick_random_track,
     write_beat_wav,
@@ -752,15 +751,6 @@ def test_music_folder_plays_user_files_not_builtins(tmp_path, monkeypatch):
     assert _BUILTIN_TRACKS
 
 
-def test_alsa_playback_prefers_dmix_so_mic_can_stay_open():
-    from plugins.lelamp.local_main import alsa_playback_device_candidates
-
-    names = alsa_playback_device_candidates("plughw:0,0", "0")
-    assert names[0].startswith("plug:dmix:")
-    assert names[-1] == "plughw:0,0"
-    assert any("dmix" in name for name in names[:-1])
-
-
 def test_mp3_player_commands_include_mpg123_and_ffmpeg(monkeypatch):
     from plugins.lelamp import local_main
 
@@ -773,22 +763,15 @@ def test_mp3_player_commands_include_mpg123_and_ffmpeg(monkeypatch):
         return known.get(name)
 
     monkeypatch.setattr(local_main, "_bin", fake_bin)
-    commands = local_main.music_player_commands(
-        Path("rain.mp3"), device="plughw:0,0", card="0"
-    )
+    commands = local_main.music_player_commands(Path("rain.mp3"), device="plughw:0,0")
     joined = [" ".join(cmd) for cmd in commands]
     assert any(line.startswith("/usr/bin/mpg123") for line in joined)
     assert any(line.startswith("/usr/bin/ffmpeg") for line in joined)
     assert not any(line.startswith("/usr/bin/aplay") for line in joined)
-    mpg_lines = [line for line in joined if line.startswith("/usr/bin/mpg123")]
-    assert mpg_lines
-    assert "dmix" in mpg_lines[0]
-    assert any("-a plughw:0,0" in line for line in mpg_lines)
-    assert all("--scale 2.50" not in line for line in mpg_lines)
-    from plugins.lelamp.local_main import SPEAKER_SOFTWARE_GAIN, mpg123_outscale
-    assert f"--scale {mpg123_outscale(100)}" in mpg_lines[0]
-    assert mpg123_outscale(100) == int(round(32768 * SPEAKER_SOFTWARE_GAIN))
-    assert " -- rain.mp3" in mpg_lines[0]
+    mpg = next(line for line in joined if line.startswith("/usr/bin/mpg123"))
+    assert "-o alsa" in mpg
+    assert "-a plughw:0,0" in mpg
+    assert "--scale 2.50" in mpg
 
 
 def test_mp3_player_commands_work_with_only_mpg123(monkeypatch):
@@ -800,22 +783,15 @@ def test_mp3_player_commands_work_with_only_mpg123(monkeypatch):
     assert commands[0][0].endswith("mpg123")
     assert "ffmpeg" not in " ".join(commands[0])
     assert "--scale" in commands[0]
-    assert "dmix" in " ".join(commands[0])
 
 
 def test_mpg123_scale_boosts_the_tiny_respeaker():
     from plugins.lelamp import local_main
 
     assert local_main.DEFAULT_MUSIC_VOLUME == 100
-    assert local_main.mpg123_scale(100) == local_main.SPEAKER_SOFTWARE_GAIN
+    assert local_main.mpg123_scale(100) == 2.5
     assert local_main.mpg123_scale(0) == 0.0
-    assert local_main.mpg123_outscale(100) == int(
-        round(local_main.MPG123_UNITY_SCALE * local_main.SPEAKER_SOFTWARE_GAIN)
-    )
-    assert local_main.mpg123_outscale(0) == 0
-    assert local_main.mpg123_outscale(100) > local_main.MPG123_UNITY_SCALE
-    # Debian mpg123 --scale is a long int; a dotted float makes it exit 1.
-    assert "." not in str(local_main.mpg123_outscale(100))
+    assert local_main.mpg123_scale(40) == 1.0
 
 
 def test_install_hint_is_mpg123_not_ffmpeg():
@@ -902,35 +878,6 @@ def test_volume_and_loop_commands_work_while_playing(tmp_path, monkeypatch):
     spoken = extract_spoken_command("请大点声")
     assert spoken
     assert parse_line(spoken).kind == "volume_delta"
-
-
-def test_music_live_phrase_and_duplex_mixer_cap(tmp_path, monkeypatch):
-    from plugins.lelamp.local_main import MUSIC_DUPLEX_DUCK, MUSIC_DUPLEX_PLAY
-
-    monkeypatch.setenv("LELAMP_MUSIC_DIR", str(tmp_path))
-    write_beat_wav(tmp_path / "desk_tune_96.wav", bpm=96, notes=(0, 4, 7), seconds=0.2)
-    lamp = LocalLamp(
-        sim=True,
-        port="/dev/null",
-        lamp_id="lelamp",
-        led_count=64,
-        brightness=70,
-    )
-    lamp.apply(parse_line("音乐"))
-    assert lamp.music_volume == 100
-    assert lamp.mixer_percent() == MUSIC_DUPLEX_PLAY
-    assert MUSIC_DUPLEX_PLAY < 100
-    lamp.duck_music_for_listen("停止音乐")
-    assert lamp.mixer_percent() == MUSIC_DUPLEX_DUCK
-    assert music_live_phrase("嗯停止音乐") == "停止音乐"
-    assert music_live_phrase("下一首吧") == "下一首"
-    assert music_live_phrase("音乐") is None
-    assert music_live_phrase("今天天气") is None
-    assert apply_speech(lamp, "停止音乐") == "music_stop"
-    assert lamp.music_playing is False
-    lamp._music_playing = True
-    assert apply_speech(lamp, "停止音乐") == "music_stop"
-    assert lamp.music_playing is True
 
 
 def test_continue_after_track_respects_loop_mode(tmp_path, monkeypatch):

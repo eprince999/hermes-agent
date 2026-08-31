@@ -88,21 +88,6 @@ SERVO_SETTLE_SECONDS = 1.0
 DEFAULT_MUSIC_VOLUME = 100
 # mpg123 --scale at 100%. ALSA stays ≤100%; this is extra software gain.
 SPEAKER_SOFTWARE_GAIN = 2.5
-# Speaker is millimetres from the mics. Full ALSA + software gain drowns Vosk.
-# Keep a listen ceiling while a song plays; duck lower when a command partial appears.
-MUSIC_DUPLEX_PLAY = 50
-MUSIC_DUPLEX_DUCK = 18
-MUSIC_LIVE_KINDS = frozenset(
-    {
-        "music_stop",
-        "music_next",
-        "volume_delta",
-        "volume",
-        "music_loop",
-        "quit",
-        "watch_stop",
-    }
-)
 
 
 def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = None) -> Path:
@@ -628,7 +613,7 @@ MUSIC_START = {
     "music", "play music", "playmusic",
 }
 MUSIC_STOP = {
-    "停止音乐", "别放了", "关掉音乐", "暂停音乐", "停歌", "关音乐",
+    "停止音乐", "别放了", "关掉音乐", "暂停音乐",
     "stop music", "stopmusic",
 }
 MUSIC_NEXT = {
@@ -974,21 +959,6 @@ def extract_spoken_command(transcript: str) -> Optional[str]:
     return best_phrase
 
 
-def music_live_phrase(transcript: str) -> Optional[str]:
-    """Longest stop/next/volume/loop keyword inside an ASR fragment."""
-    compact = _compact_speech(transcript)
-    if not compact:
-        return None
-    best = None
-    for phrase in command_phrases():
-        if phrase not in compact:
-            continue
-        if parse_line(phrase).kind in MUSIC_LIVE_KINDS:
-            if best is None or len(phrase) > len(best):
-                best = phrase
-    return best
-
-
 _EXTRA_BIN_DIRS = ("/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin", "/sbin")
 
 
@@ -1315,35 +1285,6 @@ def find_alsa_playback() -> Tuple[Optional[str], Optional[str]]:
     return parse_alsa_playback(listing)
 
 
-def alsa_playback_device_candidates(
-    device: Optional[str],
-    card: Optional[str] = None,
-) -> List[str]:
-    """Playback names to try. dmix first so Vosk can keep the capture stream.
-
-    ``plughw:N,0`` is exclusive on seeed2micvoicec. mpg123 holding it makes
-    ``stream.start()`` fail and the lamp stops hearing 停止音乐 / 下一首.
-    """
-    found: List[str] = []
-
-    def add(name: Optional[str]) -> None:
-        raw = (name or "").strip()
-        if raw and raw not in found:
-            found.append(raw)
-
-    if card is not None and str(card).strip() != "":
-        add(f"plug:dmix:CARD={card},DEV=0")
-        add(f"dmix:CARD={card},DEV=0")
-    if device:
-        if device.startswith("plughw:") or device.startswith("hw:"):
-            spec = device.split(":", 1)[1]
-            card_part = spec.split(",", 1)[0]
-            add(f"plug:dmix:{card_part}")
-            add(f"dmix:{card_part}")
-        add(device)
-    return found
-
-
 def set_alsa_playback_volume(card: Optional[str], percent: int) -> None:
     amixer = _bin("amixer")
     if not amixer or card is None or card == "":
@@ -1382,19 +1323,10 @@ def unmute_alsa_card(card: Optional[str]) -> None:
     set_alsa_playback_volume(card, DEFAULT_MUSIC_VOLUME)
 
 
-# mpg123 -f/--scale is a long int; 32768 is unity. A float like 2.50 makes it exit 1.
-MPG123_UNITY_SCALE = 32768
-
-
 def mpg123_scale(percent: int) -> float:
-    """Software gain multiplier for logs. 100% → SPEAKER_SOFTWARE_GAIN."""
+    """Software gain for the tiny ReSpeaker speaker. 100% → SPEAKER_SOFTWARE_GAIN."""
     pct = max(0, min(100, int(percent))) / 100.0
     return round(pct * SPEAKER_SOFTWARE_GAIN, 2)
-
-
-def mpg123_outscale(percent: int) -> int:
-    """Integer for mpg123 --scale. Debian mpg123 rejects 2.50 and exits 1."""
-    return int(round(MPG123_UNITY_SCALE * mpg123_scale(percent)))
 
 
 _LAST_PLAYBACK: Dict[str, Optional[str]] = {"device": None, "card": None, "backend": "alsa"}
@@ -1477,7 +1409,6 @@ def music_player_commands(
     path: Path,
     *,
     device: Optional[str] = None,
-    card: Optional[str] = None,
     backend: str = "alsa",
     volume: int = DEFAULT_MUSIC_VOLUME,
 ) -> List[List[str]]:
@@ -1495,10 +1426,8 @@ def music_player_commands(
         if suffix in {".mp3", ".mp2"} and mpg:
             pulse_args = ["-q", "-o", "pulse"]
             if Path(mpg).name == "mpg123":
-                pulse_args.extend(["--scale", str(mpg123_outscale(volume))])
-            if device:
-                pulse_args.extend(["-a", device])
-            pulse_args.extend(["--", path_s])
+                pulse_args.extend(["--scale", f"{mpg123_scale(volume):.2f}"])
+            pulse_args.append(path_s)
             add(mpg, pulse_args)
         if suffix == ".wav":
             add(_bin("paplay"), ["--sink", device, path_s])
@@ -1533,29 +1462,24 @@ def music_player_commands(
 
     aplay = _bin("aplay")
     ffmpeg = _bin("ffmpeg")
-    play_devs = alsa_playback_device_candidates(device, card)
-    if not play_devs and device:
-        play_devs = [device]
     if suffix == ".wav":
         if aplay:
-            for dev in play_devs:
-                wav = ["-q"]
-                if dev:
-                    wav.extend(["-D", dev])
-                wav.append(path_s)
-                add(aplay, wav)
+            wav = ["-q"]
+            if device:
+                wav.extend(["-D", device])
+            wav.append(path_s)
+            add(aplay, wav)
         add(_bin("paplay"), [path_s])
 
     mpg = _bin("mpg123") or _bin("mpg321")
     if suffix in {".mp3", ".mp2"} and mpg:
-        for dev in play_devs or [None]:
-            mpg_args = ["-q", "-o", "alsa"]
-            if Path(mpg).name == "mpg123":
-                mpg_args.extend(["--scale", str(mpg123_outscale(volume))])
-            if dev:
-                mpg_args.extend(["-a", dev])
-            mpg_args.extend(["--", path_s])
-            add(mpg, mpg_args)
+        mpg_args = ["-q", "-o", "alsa"]
+        if Path(mpg).name == "mpg123":
+            mpg_args.extend(["--scale", f"{mpg123_scale(volume):.2f}"])
+        if device:
+            mpg_args.extend(["-a", device])
+        mpg_args.append(path_s)
+        add(mpg, mpg_args)
 
     ffplay = _bin("ffplay")
     if ffplay:
@@ -1602,48 +1526,22 @@ def music_player_commands(
     return commands
 
 
-def _drain_pipe(pipe: Optional[object]) -> None:
-    try:
-        if pipe is not None:
-            pipe.read()  # type: ignore[union-attr]
-    except Exception:
-        pass
-
-
 def _spawn_player(argv: Sequence[str], *, env: Dict[str, str]) -> Optional["subprocess.Popen[bytes]"]:
     try:
         proc = subprocess.Popen(
             list(argv),
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             env=env,
             start_new_session=True,
         )
     except OSError as exc:
-        print(f"player skip {' '.join(list(argv)[:2])}: {exc}", flush=True)
+        print(f"player skip {' '.join(list(argv)[:2])}: {exc}")
         return None
     time.sleep(0.25)
     if proc.poll() is not None:
-        err = b""
-        try:
-            if proc.stderr is not None:
-                err = proc.stderr.read()
-        except Exception:
-            pass
-        detail = err.decode("utf-8", "replace").strip().replace("\n", " | ")
-        if len(detail) > 240:
-            detail = detail[:240]
-        shown = " ".join(list(argv)[:8])
-        extra = f"  {detail}" if detail else ""
-        print(f"player fail {shown} exit={proc.returncode}{extra}", flush=True)
+        print(f"player fail {' '.join(list(argv)[:3])} exit={proc.returncode}")
         return None
-    if proc.stderr is not None:
-        threading.Thread(
-            target=_drain_pipe,
-            args=(proc.stderr,),
-            daemon=True,
-            name="lelamp-player-err",
-        ).start()
     return proc
 
 
@@ -1736,14 +1634,11 @@ sys.stderr.write("pygame backend=%s device=%s mixer=%s\n" % (backend, device or 
 while pygame.mixer.music.get_busy():
     time.sleep(0.15)
 """
-    if importlib.util.find_spec("pygame") is None:
-        return None
     argv = [sys.executable, "-c", script, str(path), device or "", card or "", backend]
     try:
         proc = subprocess.Popen(
             argv,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
             env=env,
             start_new_session=True,
         )
@@ -1824,11 +1719,11 @@ def start_music_player(
         return None
     apply_playback_volume(volume)
     for argv in music_player_commands(
-        path, device=device, card=card, backend=backend, volume=volume
+        path, device=device, backend=backend, volume=volume
     ):
         proc = _spawn_player(argv, env=env)
         if proc is not None:
-            print(f"player {' '.join(argv[:8])}", flush=True)
+            print(f"player {' '.join(argv[:1])}")
             return proc
     pygame_proc = _spawn_pygame_player(
         path, device=device, card=card, env=env, backend=backend
@@ -1944,31 +1839,32 @@ def vosk_listen_worker(
         rec.SetWords(True)
         index = find_input_device(device)
         wanted = _input_channel_count(index)
-
-        def open_capture():
-            last_exc: Optional[BaseException] = None
-            seen_channels = set()
-            for ch in (wanted, 1, 2):
-                if ch in seen_channels:
-                    continue
-                seen_channels.add(ch)
-                print(f"打开麦克风 index={index} channels={ch} rate=16000 …")
-                try:
-                    st = sd.RawInputStream(
-                        samplerate=16000,
-                        blocksize=4000,
-                        device=index,
-                        dtype="int16",
-                        channels=ch,
-                    )
-                    st.start()
-                    return st, ch
-                except Exception as exc:
-                    last_exc = exc
-                    print(f"channels={ch} 打不开: {exc}")
+        stream = None
+        channels = wanted
+        last_exc: Optional[BaseException] = None
+        seen_channels = set()
+        for channels in (wanted, 1, 2):
+            if channels in seen_channels:
+                continue
+            seen_channels.add(channels)
+            print(f"打开麦克风 index={index} channels={channels} rate=16000 …")
+            try:
+                stream = sd.RawInputStream(
+                    samplerate=16000,
+                    blocksize=4000,
+                    device=index,
+                    dtype="int16",
+                    channels=channels,
+                )
+                stream.start()
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                print(f"channels={channels} 打不开: {exc}")
+                stream = None
+        if stream is None:
             raise last_exc or RuntimeError("麦克风打不开")
-
-        stream, channels = open_capture()
         try:
             print("麦克风流已开")
             out_q.put("__ready__")
@@ -1986,35 +1882,10 @@ def vosk_listen_worker(
                         stream.start()
                         print("麦克风收回")
                     except Exception as exc:
-                        print(f"麦克风收回失败: {exc}，重开")
-                        try:
-                            stream.close()
-                        except Exception:
-                            pass
-                        try:
-                            stream, channels = open_capture()
-                            print("麦克风重开")
-                        except Exception as exc2:
-                            print(f"麦克风重开失败: {exc2}")
-                            time.sleep(0.4)
+                        print(f"麦克风收回失败: {exc}")
                     last_partial = ""
                     continue
-                try:
-                    data, _overflow = stream.read(4000)
-                except Exception as exc:
-                    print(f"麦克风读失败: {exc}，重开")
-                    try:
-                        stream.close()
-                    except Exception:
-                        pass
-                    try:
-                        stream, channels = open_capture()
-                        print("麦克风重开")
-                    except Exception as exc2:
-                        print(f"麦克风重开失败: {exc2}")
-                        time.sleep(0.4)
-                    last_partial = ""
-                    continue
+                data, _overflow = stream.read(4000)
                 chunk = _downmix_pcm16(bytes(data), channels)
                 if rec.AcceptWaveform(chunk):
                     payload = json.loads(rec.Result())
@@ -2065,8 +1936,6 @@ def apply_speech(lamp: LocalLamp, transcript: str) -> str:
     phrase = extract_spoken_command(transcript)
     raw = phrase or compact or (transcript or "").strip()
     cmd = _command_with_watch_stop(lamp, raw, parse_line(raw))
-    if lamp.should_skip_repeat_speech(cmd.kind, raw):
-        return cmd.kind
     # While a song plays the mic stays open, so lyrics become noise.
     # Drop unknown fragments quietly; real commands still go through.
     if lamp.music_playing and cmd.kind in {"unknown", "noop"}:
@@ -2092,12 +1961,8 @@ def apply_speech(lamp: LocalLamp, transcript: str) -> str:
     if phrase and phrase != compact:
         print(f"听成：{phrase}")
     if cmd.kind == "watch_stop":
-        result = dispatch_text(lamp, "别看了")
-        lamp.mark_speech_kind(cmd.kind, raw)
-        return result
-    result = dispatch_text(lamp, raw)
-    lamp.mark_speech_kind(cmd.kind, raw)
-    return result
+        return dispatch_text(lamp, "别看了")
+    return dispatch_text(lamp, raw)
 
 
 def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path) -> int:
@@ -2127,17 +1992,7 @@ def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path)
             if item == "__ready__":
                 print("麦克风好了，请说话。")
             elif item and item.startswith("__partial__ "):
-                partial = item[len("__partial__ "):]
-                if _stdin_is_tty():
-                    print(f"\r听… {partial}", end="", flush=True)
-                live = music_live_phrase(partial) if lamp.music_playing else None
-                if live:
-                    lamp.duck_music_for_listen(live)
-                    if not lamp.should_skip_repeat_speech(parse_line(live).kind, live):
-                        if _stdin_is_tty():
-                            print()
-                        if apply_speech(lamp, live) == "quit":
-                            return 0
+                print(f"\r听… {item[len('__partial__ '):]}", end="", flush=True)
             elif item and item.startswith("__error__ "):
                 print()
                 print(item[len("__error__ "):])
@@ -2146,7 +2001,6 @@ def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path)
                 print()
                 if apply_speech(lamp, item) == "quit":
                     return 0
-            lamp.unduck_music_if_idle()
             if _stdin_is_tty() and select.select([sys.stdin], [], [], 0)[0]:
                 line = sys.stdin.readline()
                 if line == "":
@@ -2445,9 +2299,6 @@ class LocalLamp:
         self._watch_stop = threading.Event()
         self._watch_thread = None
         self._watch_playing = False
-        self._duck_until = 0.0
-        self._speech_key = ""
-        self._speech_kind_until = 0.0
 
     def start(self) -> None:
         folder = ensure_music_dir()
@@ -2646,50 +2497,6 @@ class LocalLamp:
             return path, bpm_from_name(path) or 120
         return None
 
-    def mixer_percent(self) -> int:
-        """ALSA level actually sent while a song plays next to the mics."""
-        vol = max(0, min(100, int(self.music_volume)))
-        if not self._music_playing:
-            return vol
-        cap = MUSIC_DUPLEX_DUCK if time.monotonic() < self._duck_until else MUSIC_DUPLEX_PLAY
-        return max(0, min(vol, cap))
-
-    def _push_mixer(self) -> None:
-        if self.sim:
-            return
-        apply_playback_volume(self.mixer_percent())
-
-    def duck_music_for_listen(self, reason: str = "") -> None:
-        if not self._music_playing:
-            return
-        self._duck_until = time.monotonic() + 2.5
-        self._push_mixer()
-        if reason:
-            print(f"歌压低听令 {reason}", flush=True)
-
-    def unduck_music_if_idle(self) -> None:
-        if not self._music_playing or self._duck_until <= 0:
-            return
-        if time.monotonic() < self._duck_until:
-            return
-        self._duck_until = 0.0
-        self._push_mixer()
-
-    def should_skip_repeat_speech(self, kind: str, raw: str = "") -> bool:
-        if not kind or kind in {"unknown", "noop", "busy"}:
-            return False
-        key = f"{kind}:{_compact_speech(raw)}"
-        return key == self._speech_key and time.monotonic() < self._speech_kind_until
-
-    def mark_speech_kind(self, kind: str, raw: str = "") -> None:
-        if not kind or kind in {"unknown", "noop", "busy"}:
-            return
-        self._speech_key = f"{kind}:{_compact_speech(raw)}"
-        self._speech_kind_until = time.monotonic() + 2.0
-        self._duck_until = 0.0
-        if kind != "music_stop":
-            self._push_mixer()
-
     def _hold_mic(self) -> None:
         self.mic_hold.set()
         time.sleep(0.4)
@@ -2710,19 +2517,12 @@ class LocalLamp:
         """
         proc = start_music_player(path, volume=self.music_volume)
         if proc is not None:
-            print("喇叭开着，麦克风继续听", flush=True)
-            self._push_mixer()
-            print(f"听令中歌 {self.mixer_percent()}%（说话再压低）", flush=True)
             return proc
-        print("喇叭第一次没打开，麦克风只让一下再收回（不会整首歌闭嘴）", flush=True)
         self._hold_mic()
         try:
             proc = start_music_player(path, volume=self.music_volume)
         finally:
             self._release_mic()
-        if proc is not None:
-            self._push_mixer()
-            print(f"听令中歌 {self.mixer_percent()}%（说话再压低）", flush=True)
         return proc
 
     def _play_current_track(self) -> str:
@@ -2749,10 +2549,7 @@ class LocalLamp:
         proc = self._start_player(path)
         self._music_proc = proc
         if proc is None:
-            if _bin("mpg123") or _bin("mpg321"):
-                print("mpg123 在，但没打开喇叭。看上面的 player fail。", flush=True)
-            else:
-                print_mpg123_install_hint()
+            print_mpg123_install_hint()
         self._viz_thread = threading.Thread(
             target=self._viz_loop,
             args=(bpm, hue_shift),
@@ -2856,8 +2653,9 @@ class LocalLamp:
 
     def set_volume(self, percent: int) -> str:
         self.music_volume = max(0, min(100, int(percent)))
-        self._push_mixer()
-        print(f"volume {self.music_volume}% mixer={self.mixer_percent()}%")
+        if not self.sim:
+            apply_playback_volume(self.music_volume)
+        print(f"volume {self.music_volume}%")
         return f"音量 {self.music_volume}%"
 
     def adjust_volume(self, delta: int) -> str:
