@@ -85,7 +85,8 @@ SERIAL_WAIT_SECONDS = 30.0
 # OpenDuck HWI.turn_on() waits 1s after connecting before posing.
 SERVO_SETTLE_SECONDS = 1.0
 # ReSpeaker 2-Mics speaker is tiny; 85% ALSA still sounds quiet.
-DEFAULT_MUSIC_VOLUME = 100
+# Music stays at 80% so the mics next to the speaker can still hear commands.
+DEFAULT_MUSIC_VOLUME = 80
 # mpg123 --scale at 100%. ALSA stays ≤100%; this is extra software gain.
 # mpg123 -f/--scale is a long int (32768 = unity). 2.50 makes it exit 1.
 SPEAKER_SOFTWARE_GAIN = 2
@@ -1287,6 +1288,29 @@ def find_alsa_playback() -> Tuple[Optional[str], Optional[str]]:
     return parse_alsa_playback(listing)
 
 
+def alsa_playback_device_candidates(
+    device: Optional[str],
+    card: Optional[str] = None,
+) -> List[str]:
+    """dmix first so capture (Vosk) can stay open while a song plays."""
+    found: List[str] = []
+
+    def add(name: Optional[str]) -> None:
+        raw = (name or "").strip()
+        if raw and raw not in found:
+            found.append(raw)
+
+    if card is not None and str(card).strip() != "":
+        add(f"plug:dmix:CARD={card},DEV=0")
+        add(f"dmix:CARD={card},DEV=0")
+    if device:
+        if device.startswith("plughw:") or device.startswith("hw:"):
+            spec = device.split(":", 1)[1]
+            add(f"plug:dmix:{spec.split(',', 1)[0]}")
+        add(device)
+    return found
+
+
 def set_alsa_playback_volume(card: Optional[str], percent: int) -> None:
     amixer = _bin("amixer")
     if not amixer or card is None or card == "":
@@ -1416,6 +1440,7 @@ def music_player_commands(
     path: Path,
     *,
     device: Optional[str] = None,
+    card: Optional[str] = None,
     backend: str = "alsa",
     volume: int = DEFAULT_MUSIC_VOLUME,
 ) -> List[List[str]]:
@@ -1434,7 +1459,7 @@ def music_player_commands(
             pulse_args = ["-q", "-o", "pulse"]
             if Path(mpg).name == "mpg123":
                 pulse_args.extend(["--scale", str(mpg123_outscale(volume))])
-            pulse_args.append(path_s)
+            pulse_args.extend(["--", path_s])
             add(mpg, pulse_args)
         if suffix == ".wav":
             add(_bin("paplay"), ["--sink", device, path_s])
@@ -1469,24 +1494,29 @@ def music_player_commands(
 
     aplay = _bin("aplay")
     ffmpeg = _bin("ffmpeg")
+    play_devs = alsa_playback_device_candidates(device, card)
+    if not play_devs and device:
+        play_devs = [device]
     if suffix == ".wav":
         if aplay:
-            wav = ["-q"]
-            if device:
-                wav.extend(["-D", device])
-            wav.append(path_s)
-            add(aplay, wav)
+            for dev in play_devs:
+                wav = ["-q"]
+                if dev:
+                    wav.extend(["-D", dev])
+                wav.append(path_s)
+                add(aplay, wav)
         add(_bin("paplay"), [path_s])
 
     mpg = _bin("mpg123") or _bin("mpg321")
     if suffix in {".mp3", ".mp2"} and mpg:
-        mpg_args = ["-q", "-o", "alsa"]
-        if Path(mpg).name == "mpg123":
-            mpg_args.extend(["--scale", str(mpg123_outscale(volume))])
-        if device:
-            mpg_args.extend(["-a", device])
-        mpg_args.append(path_s)
-        add(mpg, mpg_args)
+        for dev in play_devs or [None]:
+            mpg_args = ["-q", "-o", "alsa"]
+            if Path(mpg).name == "mpg123":
+                mpg_args.extend(["--scale", str(mpg123_outscale(volume))])
+            if dev:
+                mpg_args.extend(["-a", dev])
+            mpg_args.extend(["--", path_s])
+            add(mpg, mpg_args)
 
     ffplay = _bin("ffplay")
     if ffplay:
@@ -1641,11 +1671,14 @@ sys.stderr.write("pygame backend=%s device=%s mixer=%s\n" % (backend, device or 
 while pygame.mixer.music.get_busy():
     time.sleep(0.15)
 """
+    if importlib.util.find_spec("pygame") is None:
+        return None
     argv = [sys.executable, "-c", script, str(path), device or "", card or "", backend]
     try:
         proc = subprocess.Popen(
             argv,
             stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             env=env,
             start_new_session=True,
         )
@@ -1726,11 +1759,11 @@ def start_music_player(
         return None
     apply_playback_volume(volume)
     for argv in music_player_commands(
-        path, device=device, backend=backend, volume=volume
+        path, device=device, card=card, backend=backend, volume=volume
     ):
         proc = _spawn_player(argv, env=env)
         if proc is not None:
-            print(f"player {' '.join(argv[:1])}")
+            print(f"player {' '.join(argv[:8])}", flush=True)
             return proc
     pygame_proc = _spawn_pygame_player(
         path, device=device, card=card, env=env, backend=backend
@@ -1892,7 +1925,13 @@ def vosk_listen_worker(
                         print(f"麦克风收回失败: {exc}")
                     last_partial = ""
                     continue
-                data, _overflow = stream.read(4000)
+                try:
+                    data, _overflow = stream.read(4000)
+                except Exception as exc:
+                    print(f"麦克风读失败: {exc}，继续听")
+                    time.sleep(0.15)
+                    last_partial = ""
+                    continue
                 chunk = _downmix_pcm16(bytes(data), channels)
                 if rec.AcceptWaveform(chunk):
                     payload = json.loads(rec.Result())
@@ -2524,12 +2563,16 @@ class LocalLamp:
         """
         proc = start_music_player(path, volume=self.music_volume)
         if proc is not None:
+            print(f"歌 {self.music_volume}% ，麦克风继续听", flush=True)
             return proc
+        print("喇叭第一次没打开，麦克风只让一下再收回（不会整首歌闭嘴）", flush=True)
         self._hold_mic()
         try:
             proc = start_music_player(path, volume=self.music_volume)
         finally:
             self._release_mic()
+        if proc is not None:
+            print(f"歌 {self.music_volume}% ，麦克风继续听", flush=True)
         return proc
 
     def _play_current_track(self) -> str:
