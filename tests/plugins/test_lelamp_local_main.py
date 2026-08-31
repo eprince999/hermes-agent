@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from plugins.lelamp.local_main import (
@@ -277,6 +278,121 @@ def test_stdin_is_tty_skips_dev_null(monkeypatch):
     assert local_main._stdin_is_tty() is False
 
 
+def test_boot_service_unit_wakes_and_listens(tmp_path):
+    from plugins.lelamp import local_main
+
+    unit = tmp_path / "lelamp-local.service"
+    dest = local_main.install_boot_service(
+        runtime_dir=tmp_path / "runtime",
+        unit_path=unit,
+        enable=False,
+    )
+    text = dest.read_text(encoding="utf-8")
+    assert dest == unit
+    assert "$" not in text
+    assert "$(" not in text
+    assert "WantedBy=multi-user.target" in text
+    assert "Restart=on-failure" in text
+    assert "RestartSec=8" in text
+    assert local_main.BOOT_REVISION in text
+    assert "lelamp-local-run.sh" in text
+    wrapper = tmp_path / "runtime" / "lelamp-local-run.sh"
+    assert wrapper.is_file()
+    body = wrapper.read_text(encoding="utf-8")
+    assert "--listen" in body
+    assert "ttyACM0" in body
+    assert "LELAMP_LISTEN=1" in body
+    assert "wait up to 30s" in body
+    copied = tmp_path / "runtime" / "local_main.py"
+    assert copied.is_file()
+    copied_text = copied.read_text(encoding="utf-8")
+    assert 'WATCH_REVISION = "2026-08-28-follow"' in copied_text
+    assert f'BOOT_REVISION = "{local_main.BOOT_REVISION}"' in copied_text
+
+
+def test_boot_wrapper_uses_venv_python_not_uv(tmp_path):
+    from plugins.lelamp import local_main
+
+    runtime = tmp_path / "runtime"
+    venv_py = runtime / ".venv" / "bin" / "python"
+    venv_py.parent.mkdir(parents=True)
+    venv_py.write_text("#!/bin/sh\n", encoding="utf-8")
+    venv_py.chmod(0o755)
+    dest = local_main.install_boot_service(
+        runtime_dir=runtime,
+        unit_path=tmp_path / "lelamp-local.service",
+        enable=False,
+    )
+    body = (runtime / "lelamp-local-run.sh").read_text(encoding="utf-8")
+    assert ".venv/bin/python" in body
+    assert " uv " not in body
+    assert "$" not in dest.read_text(encoding="utf-8")
+
+
+def test_wait_for_serial_port_finds_existing_node(tmp_path):
+    from plugins.lelamp.local_main import wait_for_serial_port
+
+    port = tmp_path / "ttyACM0"
+    port.write_text("", encoding="utf-8")
+    assert wait_for_serial_port(str(port), timeout=1.0) is True
+
+
+def test_wait_for_serial_port_times_out(tmp_path):
+    from plugins.lelamp.local_main import wait_for_serial_port
+
+    missing = tmp_path / "missing-acm"
+    t0 = time.monotonic()
+    assert wait_for_serial_port(str(missing), timeout=0.25) is False
+    assert time.monotonic() - t0 < 1.5
+
+
+def test_wake_failure_still_listens(monkeypatch):
+    from plugins.lelamp import local_main
+
+    seen = {}
+
+    def boom(_self):
+        raise RuntimeError("rgb down")
+
+    def fake_listen(lamp, *, device, model_path):
+        seen["listen"] = True
+        return 0
+
+    monkeypatch.setattr(local_main.LocalLamp, "wake", boom)
+    monkeypatch.setattr(local_main, "run_listen_loop", fake_listen)
+    monkeypatch.setenv("LELAMP_LISTEN", "1")
+    assert local_main.main(["--sim"]) == 0
+    assert seen.get("listen") is True
+
+
+def test_lelamp_listen_env_skips_repl(monkeypatch):
+    from plugins.lelamp import local_main
+
+    seen = {}
+
+    def fake_listen(lamp, *, device, model_path):
+        seen["listen"] = True
+        return 0
+
+    monkeypatch.setenv("LELAMP_LISTEN", "1")
+    monkeypatch.setattr(local_main, "run_listen_loop", fake_listen)
+    assert local_main.main(["--sim", "--no-wake"]) == 0
+    assert seen.get("listen") is True
+
+
+def test_repl_flag_overrides_listen_env(monkeypatch):
+    from plugins.lelamp import local_main
+
+    monkeypatch.setenv("LELAMP_LISTEN", "1")
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "q")
+    monkeypatch.setattr(
+        local_main,
+        "run_listen_loop",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not listen")),
+    )
+    assert local_main.main(["--sim", "--no-wake", "--repl"]) == 0
+
+
 def test_main_sim_scripted_session(monkeypatch, capsys):
     from plugins.lelamp import local_main
 
@@ -372,6 +488,7 @@ def test_tracked_stage2_archive_has_no_music_player():
     installer = root.parent / "install_on_lamp.sh"
     script = installer.read_text(encoding="utf-8")
     assert "2026-08-28-follow" in script
+    assert "2026-08-31-openduck" in script
     assert 'DEST="$DEST_DIR/local_main.py"' in script
 
 

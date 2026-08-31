@@ -205,14 +205,24 @@ bash ~/hermes-agent/plugins/lelamp/install_on_lamp.sh
 FileZilla：本地 `hermes-agent/lelamp_runtime/local_main.py` → 远端 `/home/spocklamp/lelamp_runtime/local_main.py`。
 `git pull` 失败时也覆盖 `lelamp_il/agent_hook.py`。
 
-覆盖后重启已有开机服务（不要再跑 `--install-service`，stage 4 没有这个参数）：
+覆盖后重启已有开机服务，或第一次按 OpenDuck 同款装上：
 
 ```bash
 sudo systemctl restart lelamp-local
 journalctl -u lelamp-local -f
 ```
 
-上电流程回到 stage 4：连舵机 + RGB → 按昼夜心情上色 → 立刻播 `wake_up` → 听「你好 / 点头 / 看我 / 关灯 / 音乐」。不要同时再手动开一份 `--listen`。启动日志应有 `look-at 2026-08-28-follow`。
+上电流程对齐鸭子的 `duck-walk.service` + `~/start_duck.sh`：等 `/dev/ttyACM0` → 舵机就绪等 1 秒 → 昼夜心情色 + 立刻播 `wake_up` → 听「你好 / 点头 / 看我 / 关灯 / 音乐」。不要同时再手动开一份 `--listen`。启动日志应有 `look-at 2026-08-28-follow` 和 `boot 2026-08-31-openduck`。
+
+第一次装开机服务（灯上只做一次，或 unit 坏了再跑）：
+
+```bash
+cd ~/lelamp_runtime
+sudo LELAMP_IL_DIR=/home/spocklamp/hermes-agent/lelamp_il \
+  .venv/bin/python local_main.py --install-service
+```
+
+或：`bash ~/hermes-agent/plugins/lelamp/install_on_lamp.sh --boot`
 
 检测五个舵机（只 ping / 读位置，**不** `setup_motors` / calibrate）。开机服务占着串口时先停掉：
 
