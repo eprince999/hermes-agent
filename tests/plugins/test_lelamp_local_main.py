@@ -346,6 +346,54 @@ def test_wait_for_serial_port_times_out(tmp_path):
     assert time.monotonic() - t0 < 1.5
 
 
+def test_play_reconnects_when_motors_dropped():
+    from plugins.lelamp import local_main
+
+    lamp = local_main.LocalLamp(
+        sim=False,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    lamp.motors = None
+    seen: list[tuple] = []
+
+    class FakeMotors:
+        def dispatch(self, *args, **kwargs):
+            seen.append((args, kwargs))
+
+    def reconnect():
+        lamp.motors = FakeMotors()
+
+    lamp._reconnect_motors = reconnect  # type: ignore[method-assign]
+    lamp._play("nod")
+    assert seen
+    assert seen[0][0][0] == "play"
+    assert seen[0][0][1] == "nod"
+
+
+def test_play_without_motors_does_not_pretend_to_be_sim():
+    from plugins.lelamp import local_main
+
+    lamp = local_main.LocalLamp(
+        sim=False,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    lamp.motors = None
+
+    def boom():
+        raise RuntimeError("busy")
+
+    lamp._reconnect_motors = boom  # type: ignore[method-assign]
+    lamp._play("wake_up")
+    assert lamp.last_expression == "wake_up"
+    assert lamp.motors is None
+
+
 def test_wake_failure_still_listens(monkeypatch):
     from plugins.lelamp import local_main
 

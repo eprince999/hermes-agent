@@ -221,6 +221,15 @@ journalctl -u lelamp-local -f
 
 上电流程对齐鸭子的 `duck-walk.service` + `~/start_duck.sh`：等 `/dev/ttyACM0` → 舵机就绪等 1 秒 → 昼夜心情色 + 立刻播 `wake_up` → 听「你好 / 点头 / 看我 / 关灯 / 音乐」。不要同时再手动开一份 `--listen`。启动日志应有 `look-at 2026-08-28-follow` 和 `boot 2026-08-31-openduck`。
 
+舵机不动时，几乎都是串口被抢（两份 `local_main` 或官方 `lelamp.service`）：
+
+```bash
+sudo fuser -v /dev/ttyACM0
+journalctl -u lelamp-local -b --no-pager | tail -n 80
+```
+
+只保留一个进程：`sudo systemctl stop lelamp.service`，不要再手动 `--listen`。日志若有 `PID=` 或 `[no motors]`，就是这个原因。
+
 第一次装开机服务（灯上只做一次，或 unit 坏了再跑）：
 
 ```bash

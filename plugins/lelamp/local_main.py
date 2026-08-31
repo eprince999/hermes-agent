@@ -179,6 +179,21 @@ def wait_for_serial_port(port: str, *, timeout: float = SERIAL_WAIT_SECONDS) -> 
         time.sleep(min(0.5, remaining))
 
 
+def serial_port_users(port: str) -> List[str]:
+    """PIDs holding the servo USB node, if any."""
+    try:
+        proc = subprocess.run(
+            ["fuser", port],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return []
+    text = f"{proc.stdout or ''} {proc.stderr or ''}"
+    return [tok for tok in text.replace(":", " ").split() if tok.isdigit()]
+
+
 def boot_wrapper_script(
     *,
     runtime_dir: Path,
@@ -2089,22 +2104,17 @@ class LocalLamp:
         if self.sim:
             print("[sim] skip motors/rgb connect")
             return
-        wait_for_serial_port(self.port)
-        from lelamp.service.motors.motors_service import MotorsService
+        self._try_start_motors()
+        self._try_start_rgb()
+        print(
+            f"motors {'on' if self.motors is not None else 'MISSING'} {self.port}  "
+            f"rgb {'on' if self.rgb is not None else 'MISSING'} leds={self.led_count}",
+            flush=True,
+        )
+
+    def _try_start_rgb(self) -> None:
         from lelamp.service.rgb.rgb_service import RGBService
 
-        try:
-            self.motors = MotorsService(port=self.port, lamp_id=self.lamp_id, fps=30)
-            self.motors.start()
-            if SERVO_SETTLE_SECONDS > 0:
-                print(
-                    f"舵机就绪，等 {SERVO_SETTLE_SECONDS:.0f}s 再醒来（OpenDuck turn_on）",
-                    flush=True,
-                )
-                time.sleep(SERVO_SETTLE_SECONDS)
-        except Exception as exc:
-            print(f"舵机暂时不可用，先亮灯听令: {exc}", flush=True)
-            self.motors = None
         try:
             self.rgb = RGBService(
                 led_count=self.led_count,
@@ -2119,7 +2129,51 @@ class LocalLamp:
         except Exception as exc:
             print(f"RGB 没起来: {exc}", flush=True)
             self.rgb = None
-        print(f"motors on {self.port}  rgb leds={self.led_count}")
+
+    def _try_start_motors(self) -> None:
+        """OpenDuck: wait for the bus, then claim it. Retry — do not give up."""
+        from lelamp.service.motors.motors_service import MotorsService
+
+        wait_for_serial_port(self.port)
+        deadline = time.monotonic() + SERIAL_WAIT_SECONDS
+        attempt = 0
+        last_exc: Optional[BaseException] = None
+        while True:
+            attempt += 1
+            holders = serial_port_users(self.port)
+            if holders:
+                print(
+                    f"{self.port} 被占用 PID={','.join(holders)}。"
+                    "先停掉另一份 local_main / lelamp.service："
+                    "sudo systemctl stop lelamp.service lelamp-local",
+                    flush=True,
+                )
+            svc = None
+            try:
+                svc = MotorsService(port=self.port, lamp_id=self.lamp_id, fps=30)
+                svc.start()
+            except Exception as exc:
+                last_exc = exc
+                print(f"舵机第 {attempt} 次没起来: {exc}", flush=True)
+                if svc is not None:
+                    self.motors = svc
+                    self._release_motors()
+                else:
+                    self.motors = None
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(1.5)
+                continue
+            self.motors = svc
+            if SERVO_SETTLE_SECONDS > 0:
+                print(
+                    f"舵机就绪，等 {SERVO_SETTLE_SECONDS:.0f}s 再醒来（OpenDuck turn_on）",
+                    flush=True,
+                )
+                time.sleep(SERVO_SETTLE_SECONDS)
+            print(f"motors on {self.port}", flush=True)
+            return
+        print(f"舵机暂时没连上（点头时会再试）: {last_exc}", flush=True)
 
     def stop(self) -> None:
         self.stop_watch_person()
@@ -2138,8 +2192,11 @@ class LocalLamp:
 
     def _play(self, recording: str, *, wait: bool = True) -> None:
         self.last_expression = recording
-        if self.sim or self.motors is None:
+        if self.sim:
             print(f"[sim] play {recording}")
+            return
+        if not self._ensure_motors():
+            print(f"[no motors] play {recording}", flush=True)
             return
         self.motors.dispatch("play", recording)
 
@@ -2417,8 +2474,28 @@ class LocalLamp:
             return
         from lelamp.service.motors.motors_service import MotorsService
 
-        self.motors = MotorsService(port=self.port, lamp_id=self.lamp_id, fps=30)
-        self.motors.start()
+        holders = serial_port_users(self.port)
+        if holders:
+            print(
+                f"{self.port} 被占用 PID={','.join(holders)}，舵机连不上",
+                flush=True,
+            )
+        svc = MotorsService(port=self.port, lamp_id=self.lamp_id, fps=30)
+        svc.start()
+        self.motors = svc
+
+    def _ensure_motors(self) -> bool:
+        if self.sim:
+            return False
+        if self.motors is not None:
+            return True
+        try:
+            self._reconnect_motors()
+        except Exception as exc:
+            print(f"舵机重连失败: {exc}", flush=True)
+            self.motors = None
+            return False
+        return self.motors is not None
 
     def watch_person(self, seconds: float = 0.0) -> str:
         """Follow the person/hand until stop_watch_person(). Never scanning/nod."""
