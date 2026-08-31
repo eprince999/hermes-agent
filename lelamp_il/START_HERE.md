@@ -228,7 +228,7 @@ sudo systemctl restart lelamp-local
 journalctl -u lelamp-local -f
 ```
 
-应看到 `calibration file /root/.cache/.../lelamp.json` 或 `calibration from motor EEPROM`，然后 `wake_up` 不再报这个错。开机日志还有 `喇叭音量 100%`；ReSpeaker 小喇叭默认拉满 ALSA，mp3 再加软件增益。说「大点声 / 小点声」仍可调。
+应看到 `calibration file /root/.cache/.../lelamp.json` 或 `calibration from motor EEPROM`，然后 `wake_up` 不再报这个错。开机日志还有 `喇叭音量 100%  software×4.00`；ReSpeaker 小喇叭默认拉满 ALSA，mp3 再加软件增益。说「大点声 / 小点声」仍可调。
 
 舵机不动时，若没有校准那行错误，几乎都是串口被抢（两份 `local_main` 或官方 `lelamp.service`）：
 
