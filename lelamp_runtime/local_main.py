@@ -242,7 +242,7 @@ def boot_service_unit(
     wrapper: Optional[Path] = None,
 ) -> str:
     """Lamp analog of OpenDuck ``/etc/systemd/system/duck-walk.service``."""
-    del script, home, user, il_dir, port
+    del script, user, il_dir, port
     run = wrapper or (runtime_dir / BOOT_WRAPPER_NAME)
     # No `$` and no ExecStartPre with $(): systemd would treat them as variables
     # and never reach ExecStart.
