@@ -88,6 +88,21 @@ SERVO_SETTLE_SECONDS = 1.0
 DEFAULT_MUSIC_VOLUME = 100
 # mpg123 --scale at 100%. ALSA stays ≤100%; this is extra software gain.
 SPEAKER_SOFTWARE_GAIN = 2.5
+# Speaker is millimetres from the mics. Full ALSA + software gain drowns Vosk.
+# Keep a listen ceiling while a song plays; duck lower when a command partial appears.
+MUSIC_DUPLEX_PLAY = 50
+MUSIC_DUPLEX_DUCK = 18
+MUSIC_LIVE_KINDS = frozenset(
+    {
+        "music_stop",
+        "music_next",
+        "volume_delta",
+        "volume",
+        "music_loop",
+        "quit",
+        "watch_stop",
+    }
+)
 
 
 def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = None) -> Path:
@@ -613,7 +628,7 @@ MUSIC_START = {
     "music", "play music", "playmusic",
 }
 MUSIC_STOP = {
-    "停止音乐", "别放了", "关掉音乐", "暂停音乐",
+    "停止音乐", "别放了", "关掉音乐", "暂停音乐", "停歌", "关音乐",
     "stop music", "stopmusic",
 }
 MUSIC_NEXT = {
@@ -957,6 +972,21 @@ def extract_spoken_command(transcript: str) -> Optional[str]:
             best_pos = pos
             best_len = len(phrase)
     return best_phrase
+
+
+def music_live_phrase(transcript: str) -> Optional[str]:
+    """Longest stop/next/volume/loop keyword inside an ASR fragment."""
+    compact = _compact_speech(transcript)
+    if not compact:
+        return None
+    best = None
+    for phrase in command_phrases():
+        if phrase not in compact:
+            continue
+        if parse_line(phrase).kind in MUSIC_LIVE_KINDS:
+            if best is None or len(phrase) > len(best):
+                best = phrase
+    return best
 
 
 _EXTRA_BIN_DIRS = ("/usr/bin", "/bin", "/usr/local/bin", "/usr/sbin", "/sbin")
@@ -2035,6 +2065,8 @@ def apply_speech(lamp: LocalLamp, transcript: str) -> str:
     phrase = extract_spoken_command(transcript)
     raw = phrase or compact or (transcript or "").strip()
     cmd = _command_with_watch_stop(lamp, raw, parse_line(raw))
+    if lamp.should_skip_repeat_speech(cmd.kind, raw):
+        return cmd.kind
     # While a song plays the mic stays open, so lyrics become noise.
     # Drop unknown fragments quietly; real commands still go through.
     if lamp.music_playing and cmd.kind in {"unknown", "noop"}:
@@ -2060,8 +2092,12 @@ def apply_speech(lamp: LocalLamp, transcript: str) -> str:
     if phrase and phrase != compact:
         print(f"听成：{phrase}")
     if cmd.kind == "watch_stop":
-        return dispatch_text(lamp, "别看了")
-    return dispatch_text(lamp, raw)
+        result = dispatch_text(lamp, "别看了")
+        lamp.mark_speech_kind(cmd.kind, raw)
+        return result
+    result = dispatch_text(lamp, raw)
+    lamp.mark_speech_kind(cmd.kind, raw)
+    return result
 
 
 def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path) -> int:
@@ -2091,7 +2127,17 @@ def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path)
             if item == "__ready__":
                 print("麦克风好了，请说话。")
             elif item and item.startswith("__partial__ "):
-                print(f"\r听… {item[len('__partial__ '):]}", end="", flush=True)
+                partial = item[len("__partial__ "):]
+                if _stdin_is_tty():
+                    print(f"\r听… {partial}", end="", flush=True)
+                live = music_live_phrase(partial) if lamp.music_playing else None
+                if live:
+                    lamp.duck_music_for_listen(live)
+                    if not lamp.should_skip_repeat_speech(parse_line(live).kind, live):
+                        if _stdin_is_tty():
+                            print()
+                        if apply_speech(lamp, live) == "quit":
+                            return 0
             elif item and item.startswith("__error__ "):
                 print()
                 print(item[len("__error__ "):])
@@ -2100,6 +2146,7 @@ def run_listen_loop(lamp: LocalLamp, *, device: Optional[int], model_path: Path)
                 print()
                 if apply_speech(lamp, item) == "quit":
                     return 0
+            lamp.unduck_music_if_idle()
             if _stdin_is_tty() and select.select([sys.stdin], [], [], 0)[0]:
                 line = sys.stdin.readline()
                 if line == "":
@@ -2398,6 +2445,9 @@ class LocalLamp:
         self._watch_stop = threading.Event()
         self._watch_thread = None
         self._watch_playing = False
+        self._duck_until = 0.0
+        self._speech_key = ""
+        self._speech_kind_until = 0.0
 
     def start(self) -> None:
         folder = ensure_music_dir()
@@ -2596,6 +2646,50 @@ class LocalLamp:
             return path, bpm_from_name(path) or 120
         return None
 
+    def mixer_percent(self) -> int:
+        """ALSA level actually sent while a song plays next to the mics."""
+        vol = max(0, min(100, int(self.music_volume)))
+        if not self._music_playing:
+            return vol
+        cap = MUSIC_DUPLEX_DUCK if time.monotonic() < self._duck_until else MUSIC_DUPLEX_PLAY
+        return max(0, min(vol, cap))
+
+    def _push_mixer(self) -> None:
+        if self.sim:
+            return
+        apply_playback_volume(self.mixer_percent())
+
+    def duck_music_for_listen(self, reason: str = "") -> None:
+        if not self._music_playing:
+            return
+        self._duck_until = time.monotonic() + 2.5
+        self._push_mixer()
+        if reason:
+            print(f"歌压低听令 {reason}", flush=True)
+
+    def unduck_music_if_idle(self) -> None:
+        if not self._music_playing or self._duck_until <= 0:
+            return
+        if time.monotonic() < self._duck_until:
+            return
+        self._duck_until = 0.0
+        self._push_mixer()
+
+    def should_skip_repeat_speech(self, kind: str, raw: str = "") -> bool:
+        if not kind or kind in {"unknown", "noop", "busy"}:
+            return False
+        key = f"{kind}:{_compact_speech(raw)}"
+        return key == self._speech_key and time.monotonic() < self._speech_kind_until
+
+    def mark_speech_kind(self, kind: str, raw: str = "") -> None:
+        if not kind or kind in {"unknown", "noop", "busy"}:
+            return
+        self._speech_key = f"{kind}:{_compact_speech(raw)}"
+        self._speech_kind_until = time.monotonic() + 2.0
+        self._duck_until = 0.0
+        if kind != "music_stop":
+            self._push_mixer()
+
     def _hold_mic(self) -> None:
         self.mic_hold.set()
         time.sleep(0.4)
@@ -2617,6 +2711,8 @@ class LocalLamp:
         proc = start_music_player(path, volume=self.music_volume)
         if proc is not None:
             print("喇叭开着，麦克风继续听", flush=True)
+            self._push_mixer()
+            print(f"听令中歌 {self.mixer_percent()}%（说话再压低）", flush=True)
             return proc
         print("喇叭第一次没打开，麦克风只让一下再收回（不会整首歌闭嘴）", flush=True)
         self._hold_mic()
@@ -2624,6 +2720,9 @@ class LocalLamp:
             proc = start_music_player(path, volume=self.music_volume)
         finally:
             self._release_mic()
+        if proc is not None:
+            self._push_mixer()
+            print(f"听令中歌 {self.mixer_percent()}%（说话再压低）", flush=True)
         return proc
 
     def _play_current_track(self) -> str:
@@ -2757,9 +2856,8 @@ class LocalLamp:
 
     def set_volume(self, percent: int) -> str:
         self.music_volume = max(0, min(100, int(percent)))
-        if not self.sim:
-            apply_playback_volume(self.music_volume)
-        print(f"volume {self.music_volume}%")
+        self._push_mixer()
+        print(f"volume {self.music_volume}% mixer={self.mixer_percent()}%")
         return f"音量 {self.music_volume}%"
 
     def adjust_volume(self, delta: int) -> str:

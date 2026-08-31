@@ -13,6 +13,7 @@ from plugins.lelamp.local_main import (
     ensure_music_dir,
     extract_spoken_command,
     list_music_files,
+    music_live_phrase,
     parse_line,
     pick_random_track,
     write_beat_wav,
@@ -901,6 +902,35 @@ def test_volume_and_loop_commands_work_while_playing(tmp_path, monkeypatch):
     spoken = extract_spoken_command("请大点声")
     assert spoken
     assert parse_line(spoken).kind == "volume_delta"
+
+
+def test_music_live_phrase_and_duplex_mixer_cap(tmp_path, monkeypatch):
+    from plugins.lelamp.local_main import MUSIC_DUPLEX_DUCK, MUSIC_DUPLEX_PLAY
+
+    monkeypatch.setenv("LELAMP_MUSIC_DIR", str(tmp_path))
+    write_beat_wav(tmp_path / "desk_tune_96.wav", bpm=96, notes=(0, 4, 7), seconds=0.2)
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=70,
+    )
+    lamp.apply(parse_line("音乐"))
+    assert lamp.music_volume == 100
+    assert lamp.mixer_percent() == MUSIC_DUPLEX_PLAY
+    assert MUSIC_DUPLEX_PLAY < 100
+    lamp.duck_music_for_listen("停止音乐")
+    assert lamp.mixer_percent() == MUSIC_DUPLEX_DUCK
+    assert music_live_phrase("嗯停止音乐") == "停止音乐"
+    assert music_live_phrase("下一首吧") == "下一首"
+    assert music_live_phrase("音乐") is None
+    assert music_live_phrase("今天天气") is None
+    assert apply_speech(lamp, "停止音乐") == "music_stop"
+    assert lamp.music_playing is False
+    lamp._music_playing = True
+    assert apply_speech(lamp, "停止音乐") == "music_stop"
+    assert lamp.music_playing is True
 
 
 def test_continue_after_track_respects_loop_mode(tmp_path, monkeypatch):
