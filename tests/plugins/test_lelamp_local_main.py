@@ -763,6 +763,7 @@ def test_mp3_player_commands_include_mpg123_and_ffmpeg(monkeypatch):
     mpg = next(line for line in joined if line.startswith("/usr/bin/mpg123"))
     assert "-o alsa" in mpg
     assert "-a plughw:0,0" in mpg
+    assert "--scale 2.50" in mpg
 
 
 def test_mp3_player_commands_work_with_only_mpg123(monkeypatch):
@@ -773,6 +774,16 @@ def test_mp3_player_commands_work_with_only_mpg123(monkeypatch):
     assert commands
     assert commands[0][0].endswith("mpg123")
     assert "ffmpeg" not in " ".join(commands[0])
+    assert "--scale" in commands[0]
+
+
+def test_mpg123_scale_boosts_the_tiny_respeaker():
+    from plugins.lelamp import local_main
+
+    assert local_main.DEFAULT_MUSIC_VOLUME == 100
+    assert local_main.mpg123_scale(100) == 2.5
+    assert local_main.mpg123_scale(0) == 0.0
+    assert local_main.mpg123_scale(40) == 1.0
 
 
 def test_install_hint_is_mpg123_not_ffmpeg():
@@ -845,7 +856,7 @@ def test_volume_and_loop_commands_work_while_playing(tmp_path, monkeypatch):
         brightness=70,
     )
     lamp.apply(parse_line("音乐"))
-    assert lamp.music_volume == 85
+    assert lamp.music_volume == 100
     assert lamp._loop_mode == "all"
     assert apply_speech(lamp, "大点声") == "volume_delta"
     assert lamp.music_volume == 100

@@ -82,6 +82,10 @@ BOOT_REVISION = "2026-08-31-openduck-cal"
 SERIAL_WAIT_SECONDS = 30.0
 # OpenDuck HWI.turn_on() waits 1s after connecting before posing.
 SERVO_SETTLE_SECONDS = 1.0
+# ReSpeaker 2-Mics speaker is tiny; 85% ALSA still sounds quiet.
+DEFAULT_MUSIC_VOLUME = 100
+# mpg123 --scale at 100%. ALSA stays ≤100%; this is extra software gain.
+SPEAKER_SOFTWARE_GAIN = 2.5
 
 
 def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = None) -> Path:
@@ -1280,11 +1284,21 @@ def set_alsa_playback_volume(card: Optional[str], percent: int) -> None:
     if not amixer or card is None or card == "":
         return
     pct = f"{max(0, min(100, int(percent)))}%"
+    subprocess.run(
+        [amixer, "-c", str(card), "sset", "Auto-Mute Mode", "Disabled"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=2,
+        check=False,
+    )
+    # seeed2micvoicec / tlv320aic3x: Speaker + PCM + HP DAC. Skip Capture/PGA.
     for control in (
         "Speaker",
         "Playback",
         "PCM",
         "Digital",
+        "HP DAC",
+        "Line DAC",
         "Headphone",
         "DAC",
         "Master",
@@ -1300,7 +1314,13 @@ def set_alsa_playback_volume(card: Optional[str], percent: int) -> None:
 
 
 def unmute_alsa_card(card: Optional[str]) -> None:
-    set_alsa_playback_volume(card, 90)
+    set_alsa_playback_volume(card, DEFAULT_MUSIC_VOLUME)
+
+
+def mpg123_scale(percent: int) -> float:
+    """Software gain for the tiny ReSpeaker speaker. 100% → SPEAKER_SOFTWARE_GAIN."""
+    pct = max(0, min(100, int(percent))) / 100.0
+    return round(pct * SPEAKER_SOFTWARE_GAIN, 2)
 
 
 _LAST_PLAYBACK: Dict[str, Optional[str]] = {"device": None, "card": None, "backend": "alsa"}
@@ -1384,6 +1404,7 @@ def music_player_commands(
     *,
     device: Optional[str] = None,
     backend: str = "alsa",
+    volume: int = DEFAULT_MUSIC_VOLUME,
 ) -> List[List[str]]:
     """Build argv lists for common Pi players. Never default to HDMI."""
     path_s = str(path)
@@ -1397,7 +1418,11 @@ def music_player_commands(
     if backend == "pulse" and device:
         mpg = _bin("mpg123") or _bin("mpg321")
         if suffix in {".mp3", ".mp2"} and mpg:
-            add(mpg, ["-q", "-o", "pulse", path_s])
+            pulse_args = ["-q", "-o", "pulse"]
+            if Path(mpg).name == "mpg123":
+                pulse_args.extend(["--scale", f"{mpg123_scale(volume):.2f}"])
+            pulse_args.append(path_s)
+            add(mpg, pulse_args)
         if suffix == ".wav":
             add(_bin("paplay"), ["--sink", device, path_s])
         add(_bin("mpv"), [f"--audio-device=pulse/{device}", "--no-video", "--really-quiet", path_s])
@@ -1443,6 +1468,8 @@ def music_player_commands(
     mpg = _bin("mpg123") or _bin("mpg321")
     if suffix in {".mp3", ".mp2"} and mpg:
         mpg_args = ["-q", "-o", "alsa"]
+        if Path(mpg).name == "mpg123":
+            mpg_args.extend(["--scale", f"{mpg123_scale(volume):.2f}"])
         if device:
             mpg_args.extend(["-a", device])
         mpg_args.append(path_s)
@@ -1676,14 +1703,18 @@ def print_mpg123_install_hint() -> None:
     print("  sudo apt install -y mpg123")
 
 
-def start_music_player(path: Path, *, volume: int = 85) -> Optional["subprocess.Popen[bytes]"]:
+def start_music_player(
+    path: Path, *, volume: int = DEFAULT_MUSIC_VOLUME
+) -> Optional["subprocess.Popen[bytes]"]:
     device, card, backend = choose_playback()
     env = _player_env(device, card, backend=backend)
     if not device:
         print("没有 ReSpeaker 喇叭。不会使用 HDMI。")
         return None
     apply_playback_volume(volume)
-    for argv in music_player_commands(path, device=device, backend=backend):
+    for argv in music_player_commands(
+        path, device=device, backend=backend, volume=volume
+    ):
         proc = _spawn_player(argv, env=env)
         if proc is not None:
             print(f"player {' '.join(argv[:1])}")
@@ -2256,7 +2287,7 @@ class LocalLamp:
         self._playlist_index = 0
         self._viz_rgb: Optional[Tuple[int, int, int]] = None
         self._pre_music_rgb: Tuple[int, int, int] = MOOD_RGB["warm"]
-        self.music_volume = 85
+        self.music_volume = DEFAULT_MUSIC_VOLUME
         self._loop_mode = "all"
         self.mic_hold = threading.Event()
         self._watch_stop = threading.Event()
@@ -2271,9 +2302,21 @@ class LocalLamp:
             return
         self._try_start_motors()
         self._try_start_rgb()
+        self._apply_speaker_volume()
         print(
             f"motors {'on' if self.motors is not None else 'MISSING'} {self.port}  "
             f"rgb {'on' if self.rgb is not None else 'MISSING'} leds={self.led_count}",
+            flush=True,
+        )
+
+    def _apply_speaker_volume(self) -> None:
+        """Max the ReSpeaker mixer at boot, not only when a song starts."""
+        device, card, backend = choose_playback()
+        if device:
+            remember_playback(device, card, backend)
+        apply_playback_volume(self.music_volume)
+        print(
+            f"喇叭音量 {self.music_volume}%  software×{mpg123_scale(self.music_volume):.2f}",
             flush=True,
         )
 
