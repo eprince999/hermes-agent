@@ -669,7 +669,15 @@ def test_tracked_stage2_archive_has_no_music_player():
     dropin = (
         Path(__file__).resolve().parents[2] / "lelamp_runtime" / "local_main.py"
     )
+    runtime_snap = (
+        Path(__file__).resolve().parents[2]
+        / "lelamp_runtime"
+        / "lamp_snapshots"
+        / "stage4.py"
+    )
     assert dropin.read_text(encoding="utf-8") == runnable
+    assert runtime_snap.read_text(encoding="utf-8") == runnable
+    assert 'STAGE4_SNAPSHOT = "2026-08-31-stage4"' in runnable
     installer = root.parent / "install_on_lamp.sh"
     script = installer.read_text(encoding="utf-8")
     assert "2026-08-28-follow" in script

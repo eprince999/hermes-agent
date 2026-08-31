@@ -78,6 +78,8 @@ WATCH_REVISION = "2026-08-28-follow"
 # Printed at boot. Match OpenDuck duck-walk.service + ~/start_duck.sh.
 # -cal: find existing LeRobot json (sudo calibrate writes /root/.cache).
 BOOT_REVISION = "2026-08-31-openduck-cal"
+# Frozen stage 4: look-at + OpenDuck boot + existing Feetech cal + loud speaker.
+STAGE4_SNAPSHOT = "2026-08-31-stage4"
 # USB CDC ACM can appear after local-fs.target on a Pi Zero 2W.
 SERIAL_WAIT_SECONDS = 30.0
 # OpenDuck HWI.turn_on() waits 1s after connecting before posing.
@@ -343,7 +345,11 @@ def print_boot_status(
         print(f"  {path} exists={exists} executable={exe}", flush=True)
     if script.is_file():
         for line in script.read_text(encoding="utf-8", errors="replace").splitlines():
-            if "BOOT_REVISION =" in line or "WATCH_REVISION =" in line:
+            if (
+                "BOOT_REVISION =" in line
+                or "WATCH_REVISION =" in line
+                or "STAGE4_SNAPSHOT =" in line
+            ):
                 print(f"  {line.strip()}", flush=True)
     if unit.is_file():
         print("--- unit ---", flush=True)
@@ -2855,6 +2861,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.boot_status:
         return print_boot_status()
     print(f"local_main  stage {AGENT_STAGE}  ({AGENT_LABEL})")
+    print(f"snapshot {STAGE4_SNAPSHOT}", flush=True)
     print(f"boot {BOOT_REVISION}", flush=True)
     print(
         f"look-at {WATCH_REVISION}  {Path(__file__).resolve()}  "

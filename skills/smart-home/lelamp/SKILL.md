@@ -48,7 +48,7 @@ Keep the runnable name `local_main.py`. Snapshots live next to it:
 
 - `lamp_snapshots/stage2.py` — Chinese Vosk keywords only
 - `lamp_snapshots/stage3.py` — music folder + volume/loop
-- `lamp_snapshots/stage4.py` — current runnable, adds **看我** look-at
+- `lamp_snapshots/stage4.py` — frozen runnable: 看我 + OpenDuck 开机 + 校准路径 + 喇叭 100%
 
 Copy a snapshot back over `local_main.py` to roll back. Do not invent `local_main_v2.py` as the launcher.
 

@@ -33,8 +33,9 @@ cp -f "$SRC" "$DEST_DIR/lamp_snapshots/stage4.py"
 
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 if [[ -f "$REPO_ROOT/plugins/lelamp/local_main.py" ]]; then
-  mkdir -p "$REPO_ROOT/lelamp_runtime"
-  cp -f "$SRC" "$REPO_ROOT/lelamp_runtime/local_main.py"
+    mkdir -p "$REPO_ROOT/lelamp_runtime/lamp_snapshots"
+    cp -f "$SRC" "$REPO_ROOT/lelamp_runtime/local_main.py"
+    cp -f "$SRC" "$REPO_ROOT/lelamp_runtime/lamp_snapshots/stage4.py"
 fi
 
 echo "已写入 $DEST"
