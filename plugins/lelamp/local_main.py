@@ -87,7 +87,7 @@ SERVO_SETTLE_SECONDS = 1.0
 # ReSpeaker 2-Mics speaker is tiny; 85% ALSA still sounds quiet.
 DEFAULT_MUSIC_VOLUME = 100
 # mpg123 --scale at 100%. ALSA stays ≤100%; this is extra software gain.
-SPEAKER_SOFTWARE_GAIN = 4.0
+SPEAKER_SOFTWARE_GAIN = 2.5
 
 
 def snapshot_current(name: Optional[str] = None, *, dest_dir: Optional[Path] = None) -> Path:
