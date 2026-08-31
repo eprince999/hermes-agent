@@ -203,7 +203,14 @@ bash ~/hermes-agent/plugins/lelamp/install_on_lamp.sh
 ```
 
 FileZilla：本地 `hermes-agent/lelamp_runtime/local_main.py` → 远端 `/home/spocklamp/lelamp_runtime/local_main.py`。
-`git pull` 失败时也覆盖 `lelamp_il/agent_hook.py`。
+不要用 `raw.githubusercontent.com`（会 429）。灯上覆盖用 GitHub API 或 git：
+
+```bash
+curl -fsSL -H "Accept: application/vnd.github.raw" \
+  "https://api.github.com/repos/eprince999/hermes-agent/contents/lelamp_runtime/local_main.py?ref=cursor/lelamp-zero2w-train-36b0" \
+  -o ~/lelamp_runtime/local_main.py
+grep -E "install-service|BOOT_REVISION" ~/lelamp_runtime/local_main.py | head
+```
 
 覆盖后重启已有开机服务，或第一次按 OpenDuck 同款装上：
 

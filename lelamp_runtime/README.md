@@ -8,9 +8,16 @@
 
 FileZilla：本地选仓库里的 `lelamp_runtime/local_main.py`，远端选 `~/lelamp_runtime/local_main.py`。
 
-不要把 `record_demo.py` 放进这个目录。音乐、Vosk 模型仍用灯上 runtime 里已有的 `music/` 和 `models/`。
+不要用 `raw.githubusercontent.com`（会 429）。灯上覆盖：
 
-开机自启（和鸭子 `duck-walk.service` 一样：上电等串口，醒来，听中文指令）：
+```bash
+curl -fsSL -H "Accept: application/vnd.github.raw" \
+  "https://api.github.com/repos/eprince999/hermes-agent/contents/lelamp_runtime/local_main.py?ref=cursor/lelamp-zero2w-train-36b0" \
+  -o ~/lelamp_runtime/local_main.py
+grep install-service ~/lelamp_runtime/local_main.py | head
+```
+
+覆盖成功后再装开机服务：
 
 ```bash
 cd ~/lelamp_runtime
