@@ -1323,10 +1323,19 @@ def unmute_alsa_card(card: Optional[str]) -> None:
     set_alsa_playback_volume(card, DEFAULT_MUSIC_VOLUME)
 
 
+# mpg123 -f/--scale is a long int; 32768 is unity. A float like 2.50 makes it exit 1.
+MPG123_UNITY_SCALE = 32768
+
+
 def mpg123_scale(percent: int) -> float:
-    """Software gain for the tiny ReSpeaker speaker. 100% → SPEAKER_SOFTWARE_GAIN."""
+    """Software gain multiplier for logs. 100% → SPEAKER_SOFTWARE_GAIN."""
     pct = max(0, min(100, int(percent))) / 100.0
     return round(pct * SPEAKER_SOFTWARE_GAIN, 2)
+
+
+def mpg123_outscale(percent: int) -> int:
+    """Integer for mpg123 --scale. Debian mpg123 rejects 2.50 and exits 1."""
+    return int(round(MPG123_UNITY_SCALE * mpg123_scale(percent)))
 
 
 _LAST_PLAYBACK: Dict[str, Optional[str]] = {"device": None, "card": None, "backend": "alsa"}
@@ -1426,8 +1435,10 @@ def music_player_commands(
         if suffix in {".mp3", ".mp2"} and mpg:
             pulse_args = ["-q", "-o", "pulse"]
             if Path(mpg).name == "mpg123":
-                pulse_args.extend(["--scale", f"{mpg123_scale(volume):.2f}"])
-            pulse_args.append(path_s)
+                pulse_args.extend(["--scale", str(mpg123_outscale(volume))])
+            if device:
+                pulse_args.extend(["-a", device])
+            pulse_args.extend(["--", path_s])
             add(mpg, pulse_args)
         if suffix == ".wav":
             add(_bin("paplay"), ["--sink", device, path_s])
@@ -1475,10 +1486,10 @@ def music_player_commands(
     if suffix in {".mp3", ".mp2"} and mpg:
         mpg_args = ["-q", "-o", "alsa"]
         if Path(mpg).name == "mpg123":
-            mpg_args.extend(["--scale", f"{mpg123_scale(volume):.2f}"])
+            mpg_args.extend(["--scale", str(mpg123_outscale(volume))])
         if device:
             mpg_args.extend(["-a", device])
-        mpg_args.append(path_s)
+        mpg_args.extend(["--", path_s])
         add(mpg, mpg_args)
 
     ffplay = _bin("ffplay")
@@ -1531,16 +1542,27 @@ def _spawn_player(argv: Sequence[str], *, env: Dict[str, str]) -> Optional["subp
         proc = subprocess.Popen(
             list(argv),
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             env=env,
             start_new_session=True,
         )
     except OSError as exc:
-        print(f"player skip {' '.join(list(argv)[:2])}: {exc}")
+        print(f"player skip {' '.join(list(argv)[:2])}: {exc}", flush=True)
         return None
     time.sleep(0.25)
     if proc.poll() is not None:
-        print(f"player fail {' '.join(list(argv)[:3])} exit={proc.returncode}")
+        err = b""
+        try:
+            if proc.stderr is not None:
+                err = proc.stderr.read()
+        except Exception:
+            pass
+        detail = err.decode("utf-8", "replace").strip().replace("\n", " | ")
+        if len(detail) > 240:
+            detail = detail[:240]
+        shown = " ".join(list(argv)[:8])
+        extra = f"  {detail}" if detail else ""
+        print(f"player fail {shown} exit={proc.returncode}{extra}", flush=True)
         return None
     return proc
 
@@ -1634,11 +1656,14 @@ sys.stderr.write("pygame backend=%s device=%s mixer=%s\n" % (backend, device or 
 while pygame.mixer.music.get_busy():
     time.sleep(0.15)
 """
+    if importlib.util.find_spec("pygame") is None:
+        return None
     argv = [sys.executable, "-c", script, str(path), device or "", card or "", backend]
     try:
         proc = subprocess.Popen(
             argv,
             stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             env=env,
             start_new_session=True,
         )
@@ -2549,7 +2574,10 @@ class LocalLamp:
         proc = self._start_player(path)
         self._music_proc = proc
         if proc is None:
-            print_mpg123_install_hint()
+            if _bin("mpg123") or _bin("mpg321"):
+                print("mpg123 在，但没打开喇叭。看上面的 player fail。", flush=True)
+            else:
+                print_mpg123_install_hint()
         self._viz_thread = threading.Thread(
             target=self._viz_loop,
             args=(bpm, hue_shift),

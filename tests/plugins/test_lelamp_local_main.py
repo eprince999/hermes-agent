@@ -771,7 +771,11 @@ def test_mp3_player_commands_include_mpg123_and_ffmpeg(monkeypatch):
     mpg = next(line for line in joined if line.startswith("/usr/bin/mpg123"))
     assert "-o alsa" in mpg
     assert "-a plughw:0,0" in mpg
-    assert "--scale 2.50" in mpg
+    assert "--scale 2.50" not in mpg
+    from plugins.lelamp.local_main import SPEAKER_SOFTWARE_GAIN, mpg123_outscale
+    assert f"--scale {mpg123_outscale(100)}" in mpg
+    assert mpg123_outscale(100) == int(round(32768 * SPEAKER_SOFTWARE_GAIN))
+    assert " -- rain.mp3" in mpg or mpg.endswith("-- rain.mp3")
 
 
 def test_mp3_player_commands_work_with_only_mpg123(monkeypatch):
@@ -789,9 +793,15 @@ def test_mpg123_scale_boosts_the_tiny_respeaker():
     from plugins.lelamp import local_main
 
     assert local_main.DEFAULT_MUSIC_VOLUME == 100
-    assert local_main.mpg123_scale(100) == 2.5
+    assert local_main.mpg123_scale(100) == local_main.SPEAKER_SOFTWARE_GAIN
     assert local_main.mpg123_scale(0) == 0.0
-    assert local_main.mpg123_scale(40) == 1.0
+    assert local_main.mpg123_outscale(100) == int(
+        round(local_main.MPG123_UNITY_SCALE * local_main.SPEAKER_SOFTWARE_GAIN)
+    )
+    assert local_main.mpg123_outscale(0) == 0
+    assert local_main.mpg123_outscale(100) > local_main.MPG123_UNITY_SCALE
+    # Debian mpg123 --scale is a long int; a dotted float makes it exit 1.
+    assert "." not in str(local_main.mpg123_outscale(100))
 
 
 def test_install_hint_is_mpg123_not_ffmpeg():
