@@ -4,7 +4,8 @@
 # the copy inside hermes-agent. Saying 「看我」 and getting「6.0 秒」means
 # this copy was skipped.
 # Cold-boot uses OpenDuck-style systemd (duck-walk.service analog):
-# BOOT_REVISION=2026-08-31-openduck-cal. Re-run with --boot after first copy.
+# BOOT_REVISION=2026-09-01-fast-wake. Re-run with --boot after first copy
+# so systemd stops waiting for bluetooth / multi-user before wake.
 set -euo pipefail
 
 REV="2026-08-28-follow"
@@ -62,4 +63,4 @@ echo "    \"https://api.github.com/repos/eprince999/hermes-agent/contents/lelamp
 echo "    -o \$DEST"
 echo "开机自启（上电等串口、wake_up、听令），和鸭子 duck-walk.service 一样："
 echo "  bash $HERE/install_on_lamp.sh --boot"
-echo "启动应看到: look-at ${REV} 以及 boot 2026-08-31-openduck-cal"
+echo "启动应看到: look-at ${REV} 以及 boot 2026-09-01-fast-wake"

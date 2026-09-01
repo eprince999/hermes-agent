@@ -293,6 +293,10 @@ def test_boot_service_unit_wakes_and_listens(tmp_path):
     assert "$" not in text
     assert "$(" not in text
     assert "WantedBy=multi-user.target" in text
+    assert "After=local-fs.target" in text
+    assert "bluetooth.service" not in text
+    assert "After=local-fs.target bluetooth" not in text
+    assert text.count("multi-user.target") == 1
     assert "Restart=on-failure" in text
     assert "RestartSec=8" in text
     assert local_main.BOOT_REVISION in text
@@ -304,6 +308,7 @@ def test_boot_service_unit_wakes_and_listens(tmp_path):
     assert "ttyACM0" in body
     assert "LELAMP_LISTEN=1" in body
     assert "wait up to 30s" in body
+    assert "sleep 1" not in body
     copied = tmp_path / "runtime" / "local_main.py"
     assert copied.is_file()
     copied_text = copied.read_text(encoding="utf-8")
@@ -681,7 +686,7 @@ def test_tracked_stage2_archive_has_no_music_player():
     installer = root.parent / "install_on_lamp.sh"
     script = installer.read_text(encoding="utf-8")
     assert "2026-08-28-follow" in script
-    assert "2026-08-31-openduck" in script
+    assert "2026-09-01-fast-wake" in script
     assert 'DEST="$DEST_DIR/local_main.py"' in script
 
 

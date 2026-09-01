@@ -219,7 +219,7 @@ sudo systemctl restart lelamp-local
 journalctl -u lelamp-local -f
 ```
 
-上电流程对齐鸭子的 `duck-walk.service` + `~/start_duck.sh`：等 `/dev/ttyACM0` → 舵机就绪等 1 秒 → 昼夜心情色 + 立刻播 `wake_up` → 听「你好 / 点头 / 看我 / 关灯 / 音乐」。不要同时再手动开一份 `--listen`。启动日志应有 `look-at 2026-08-28-follow`、`boot 2026-08-31-openduck-cal` 和 `snapshot 2026-08-31-stage4`。当前可运行代码已冻结为 stage 4：`plugins/lelamp/lamp_snapshots/stage4.py` 与 `lelamp_runtime/lamp_snapshots/stage4.py`。回滚就把 snapshot 拷回 `local_main.py`。
+上电流程：systemd 只等文件系统（不等蓝牙 / 整个 multi-user），先亮灯环，Python 再等 `/dev/ttyACM0` → 舵机就绪等 1 秒 → 播 `wake_up` → 听「你好 / 点头 / 看我 / 关灯 / 音乐」。不要同时再手动开一份 `--listen`。**改了开机 unit 后必须重新 `--install-service`，只 `restart` 不会重写 unit。** 启动日志应有 `look-at 2026-08-28-follow`、`boot 2026-09-01-fast-wake` 和 `snapshot 2026-08-31-stage4`。当前可运行代码已冻结为 stage 4：`plugins/lelamp/lamp_snapshots/stage4.py` 与 `lelamp_runtime/lamp_snapshots/stage4.py`。回滚就把 snapshot 拷回 `local_main.py`。
 
 日志若有 `has no calibration registered`：串口和五个舵机是好的，`play_recording` 只是找不到已有校准 json。官方 `sudo uv run -m lelamp.calibrate` 写到 `/root/.cache/huggingface/lerobot/`，开机服务却把 `HOME` 设成 `/home/spocklamp`。新脚本会去 `/root` 和用户 home 找已有文件，或从舵机 EEPROM 读回，**不要重新 calibrate**。覆盖 `local_main.py` 后：
 

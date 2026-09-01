@@ -75,9 +75,10 @@ AGENT_STAGE = 4
 AGENT_LABEL = "vosk listen + music folder + look-at"
 # If the lamp prints「已看向画面中的人（6.0 秒）」it is still the old runtime copy.
 WATCH_REVISION = "2026-08-28-follow"
-# Printed at boot. Match OpenDuck duck-walk.service + ~/start_duck.sh.
+# Printed at boot. OpenDuck-style unit, but do not wait for bluetooth /
+# multi-user — those delay wake by tens of seconds on a Pi Zero 2W.
 # -cal: find existing LeRobot json (sudo calibrate writes /root/.cache).
-BOOT_REVISION = "2026-08-31-openduck-cal"
+BOOT_REVISION = "2026-09-01-fast-wake"
 # Frozen stage 4: look-at + OpenDuck boot + existing Feetech cal + loud speaker.
 STAGE4_SNAPSHOT = "2026-08-31-stage4"
 # USB CDC ACM can appear after local-fs.target on a Pi Zero 2W.
@@ -252,16 +253,7 @@ echo "lelamp-local-run {BOOT_REVISION}" | tee -a "$log"
 if [ -e {serial} ]; then
   echo "serial ready {serial}" | tee -a "$log"
 else
-  echo "serial missing {serial}, wait up to 30s" | tee -a "$log"
-  i=0
-  while [ "$i" -lt 30 ]; do
-    if [ -e {serial} ]; then
-      echo "serial ready {serial}" | tee -a "$log"
-      break
-    fi
-    i=$((i + 1))
-    sleep 1
-  done
+  echo "serial missing {serial}, python waits up to 30s" | tee -a "$log"
 fi
 echo "exec {cmd}" | tee -a "$log"
 exec {cmd}
@@ -285,10 +277,12 @@ def boot_service_unit(
     run = wrapper or (runtime_dir / BOOT_WRAPPER_NAME)
     # No `$` and no ExecStartPre with $(): systemd would treat them as variables
     # and never reach ExecStart.
+    # After=multi-user.target + bluetooth.service delayed wake until ssh,
+    # networking, and BT were up. WantedBy= still starts us at boot; After=
+    # only needs the filesystem. Python waits for /dev/ttyACM0.
     return f"""[Unit]
 Description=LeLamp local agent (wake + listen, {BOOT_REVISION})
-After=local-fs.target bluetooth.service multi-user.target
-Wants=bluetooth.service
+After=local-fs.target
 StartLimitIntervalSec=0
 
 [Service]
@@ -472,7 +466,7 @@ def install_boot_service(
         f"已开机自启 {BOOT_SERVICE_NAME}（{BOOT_REVISION}，OpenDuck duck-walk 同款）。",
         flush=True,
     )
-    print("上电：等串口 → 昼夜色 + wake_up → 听令。不要再手动开一份 --listen。", flush=True)
+    print("上电：先亮灯环 → 等串口 → wake_up → 听令。不要再手动开一份 --listen。", flush=True)
     print(f"日志: journalctl -u {BOOT_SERVICE_NAME} -b --no-pager", flush=True)
     print(f"文件日志: {runtime / 'lelamp_start.log'}", flush=True)
     if enable_proc.returncode != 0 or restart_proc.returncode != 0 or active != "active":
@@ -2352,14 +2346,28 @@ class LocalLamp:
         if self.sim:
             print("[sim] skip motors/rgb connect")
             return
-        self._try_start_motors()
+        t0 = time.monotonic()
+        # Light the ring before LeRobot import / serial wait, or the lamp
+        # stays dark for a long time on Pi Zero 2W.
         self._try_start_rgb()
+        self._light_now()
+        print(f"灯环亮了 {time.monotonic() - t0:.1f}s", flush=True)
+        self._try_start_motors()
         self._apply_speaker_volume()
         print(
             f"motors {'on' if self.motors is not None else 'MISSING'} {self.port}  "
-            f"rgb {'on' if self.rgb is not None else 'MISSING'} leds={self.led_count}",
+            f"rgb {'on' if self.rgb is not None else 'MISSING'} leds={self.led_count}  "
+            f"{time.monotonic() - t0:.1f}s",
             flush=True,
         )
+
+    def _light_now(self) -> None:
+        """Circadian color as soon as the ring is up, before servo wait."""
+        if self.rgb is None:
+            return
+        mood, bri = circadian_mood()
+        self.brightness = bri
+        self._apply_rgb(MOOD_RGB[mood])
 
     def _apply_speaker_volume(self) -> None:
         """Max the ReSpeaker mixer at boot, not only when a song starts."""
@@ -2393,9 +2401,30 @@ class LocalLamp:
     def _try_start_motors(self) -> None:
         """OpenDuck: wait for the bus, then claim it. Retry — do not give up."""
         apply_lerobot_calibration_env(self.lamp_id)
-        from lelamp.service.motors.motors_service import MotorsService
+        import_err: List[BaseException] = []
+        imported: List[object] = []
 
+        def _load_motors_service() -> None:
+            try:
+                from lelamp.service.motors.motors_service import MotorsService as cls
+
+                imported.append(cls)
+            except Exception as exc:
+                import_err.append(exc)
+
+        loader = threading.Thread(
+            target=_load_motors_service,
+            daemon=True,
+            name="lelamp-motors-import",
+        )
+        loader.start()
         wait_for_serial_port(self.port)
+        loader.join()
+        if import_err or not imported:
+            err = import_err[0] if import_err else RuntimeError("MotorsService missing")
+            print(f"舵机模块没加载: {err}", flush=True)
+            return
+        MotorsService = imported[0]
         deadline = time.monotonic() + SERIAL_WAIT_SECONDS
         attempt = 0
         last_exc: Optional[BaseException] = None
@@ -2846,7 +2875,10 @@ class LocalLamp:
         self.brightness = bri
         self._apply_rgb(MOOD_RGB[mood])
         self._play("wake_up")
-        print(f"台灯醒了。现在 {mood} 光，亮度 {self.brightness}%。输入 help 看命令。")
+        print(
+            f"台灯醒了。现在 {mood} 光，亮度 {self.brightness}%。输入 help 看命令。",
+            flush=True,
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
