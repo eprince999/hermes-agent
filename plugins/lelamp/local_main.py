@@ -236,6 +236,7 @@ export PYTHONUNBUFFERED=1
 export UV_NO_SYNC=1
 export UV_OFFLINE=1
 export PATH={shlex.quote(path_env)}
+log={log}
 # Official sudo calibrate stores json under /root/.cache.
 # This service sets HOME to the lamp user, so point LeRobot at whichever
 # cache already has lelamp_follower/*.json. Do not re-calibrate.
@@ -251,7 +252,6 @@ do
   fi
 done
 cd {shlex.quote(str(runtime_dir))} || exit 1
-log={log}
 echo "lelamp-local-run {BOOT_REVISION}" | tee -a "$log"
 if [ -e {serial} ]; then
   echo "serial ready {serial}" | tee -a "$log"

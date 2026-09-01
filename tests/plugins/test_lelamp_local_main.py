@@ -340,6 +340,7 @@ def test_boot_service_unit_wakes_and_listens(tmp_path):
     assert "LELAMP_LISTEN=1" in body
     assert "python waits up to 30s" in body
     assert "sleep 1" not in body
+    assert body.index("\nlog=") < body.index('tee -a "$log"')
     copied = tmp_path / "runtime" / "local_main.py"
     assert copied.is_file()
     copied_text = copied.read_text(encoding="utf-8")
