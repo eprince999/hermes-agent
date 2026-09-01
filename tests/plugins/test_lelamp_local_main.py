@@ -279,7 +279,7 @@ def test_fade_rgb_frames_eases_up_from_black():
     assert lumas == sorted(lumas)
 
 
-def test_sim_wake_fade_does_not_sleep(monkeypatch):
+def test_sim_wake_fade_does_not_sleep(monkeypatch, capsys):
     from plugins.lelamp import local_main
     from plugins.lelamp.local_main import LocalLamp, _scale_rgb, circadian_mood, MOOD_RGB
 
@@ -297,6 +297,8 @@ def test_sim_wake_fade_does_not_sleep(monkeypatch):
     assert slept == []
     assert lamp.last_rgb == _scale_rgb(MOOD_RGB[mood], bri)
     assert lamp.last_expression == "wake_up"
+    out = capsys.readouterr().out
+    assert out.find("渐亮完成，wake_up") < out.find("[sim] play wake_up")
 
 
 def test_stdin_is_tty_skips_dev_null(monkeypatch):
@@ -934,41 +936,6 @@ def test_volume_and_loop_commands_work_while_playing(tmp_path, monkeypatch):
     spoken = extract_spoken_command("请大点声")
     assert spoken
     assert parse_line(spoken).kind == "volume_delta"
-
-
-def test_music_live_phrase_and_duck_without_capping_the_song(tmp_path, monkeypatch):
-    from plugins.lelamp.local_main import (
-        MUSIC_DUPLEX_DUCK,
-        music_listen_hint,
-        music_live_phrase,
-    )
-
-    monkeypatch.setenv("LELAMP_MUSIC_DIR", str(tmp_path))
-    write_beat_wav(tmp_path / "desk_tune_96.wav", bpm=96, notes=(0, 4, 7), seconds=0.2)
-    lamp = LocalLamp(
-        sim=True,
-        port="/dev/null",
-        lamp_id="lelamp",
-        led_count=64,
-        brightness=70,
-    )
-    lamp.apply(parse_line("音乐"))
-    assert lamp.music_volume == 80
-    assert lamp.mixer_percent() == 80
-    lamp.duck_music_for_listen("停止音乐")
-    assert lamp.mixer_percent() == MUSIC_DUPLEX_DUCK
-    assert music_live_phrase("嗯停止音乐") == "停止音乐"
-    assert music_live_phrase("下一首吧") == "下一首"
-    assert music_live_phrase("音乐") is None
-    assert music_live_phrase("今天天气") is None
-    assert music_listen_hint("停止") is True
-    assert music_listen_hint("今天") is False
-    assert parse_line("停歌").kind == "music_stop"
-    assert apply_speech(lamp, "停止音乐") == "music_stop"
-    assert lamp.music_playing is False
-    lamp._music_playing = True
-    assert apply_speech(lamp, "停止音乐") == "music_stop"
-    assert lamp.music_playing is True
 
 
 def test_continue_after_track_respects_loop_mode(tmp_path, monkeypatch):
