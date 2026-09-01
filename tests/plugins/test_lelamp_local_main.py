@@ -307,7 +307,7 @@ def test_boot_service_unit_wakes_and_listens(tmp_path):
     assert "--listen" in body
     assert "ttyACM0" in body
     assert "LELAMP_LISTEN=1" in body
-    assert "wait up to 30s" in body
+    assert "python waits up to 30s" in body
     assert "sleep 1" not in body
     copied = tmp_path / "runtime" / "local_main.py"
     assert copied.is_file()
