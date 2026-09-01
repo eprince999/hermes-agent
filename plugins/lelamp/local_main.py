@@ -85,6 +85,9 @@ STAGE4_SNAPSHOT = "2026-08-31-stage4"
 SERIAL_WAIT_SECONDS = 30.0
 # OpenDuck HWI.turn_on() waits 1s after connecting before posing.
 SERVO_SETTLE_SECONDS = 1.0
+# Ring fade-in from black. RGB only — never mpg123 / ALSA / motors.
+WAKE_FADE_SECONDS = 2.2
+WAKE_FADE_STEPS = 28
 # ReSpeaker 2-Mics speaker is tiny; 85% ALSA still sounds quiet.
 # Music stays at 80% so the mics next to the speaker can still hear commands.
 DEFAULT_MUSIC_VOLUME = 80
@@ -713,6 +716,22 @@ def lerp_rgb(
         int(start[1] + (end[1] - start[1]) * t),
         int(start[2] + (end[2] - start[2]) * t),
     )
+
+
+def fade_rgb_frames(
+    start: Tuple[int, int, int],
+    end: Tuple[int, int, int],
+    steps: int = WAKE_FADE_STEPS,
+) -> List[Tuple[int, int, int]]:
+    """Ease-in-out frames from start to end. Last frame is exactly end."""
+    n = max(1, int(steps))
+    frames: List[Tuple[int, int, int]] = []
+    for i in range(1, n + 1):
+        t = i / n
+        eased = t * t * (3.0 - 2.0 * t)
+        frames.append(lerp_rgb(start, end, eased))
+    frames[-1] = (int(end[0]), int(end[1]), int(end[2]))
+    return frames
 
 
 _VIZ_WARM = (255, 186, 92)
@@ -2339,6 +2358,8 @@ class LocalLamp:
         self._watch_stop = threading.Event()
         self._watch_thread = None
         self._watch_playing = False
+        self._fade_stop = threading.Event()
+        self._fade_thread = None
 
     def start(self) -> None:
         folder = ensure_music_dir()
@@ -2351,7 +2372,7 @@ class LocalLamp:
         # stays dark for a long time on Pi Zero 2W.
         self._try_start_rgb()
         self._light_now()
-        print(f"灯环亮了 {time.monotonic() - t0:.1f}s", flush=True)
+        print(f"灯环开始渐亮 {time.monotonic() - t0:.1f}s", flush=True)
         self._try_start_motors()
         self._apply_speaker_volume()
         print(
@@ -2362,12 +2383,12 @@ class LocalLamp:
         )
 
     def _light_now(self) -> None:
-        """Circadian color as soon as the ring is up, before servo wait."""
+        """Start circadian fade as soon as the ring is up, before servo wait."""
         if self.rgb is None:
             return
         mood, bri = circadian_mood()
         self.brightness = bri
-        self._apply_rgb(MOOD_RGB[mood])
+        self._apply_rgb(MOOD_RGB[mood], fade=True, background=True)
 
     def _apply_speaker_volume(self) -> None:
         """Max the ReSpeaker mixer at boot, not only when a song starts."""
@@ -2467,6 +2488,7 @@ class LocalLamp:
         print(f"舵机暂时没连上（点头时会再试）: {last_exc}", flush=True)
 
     def stop(self) -> None:
+        self._stop_light_fade()
         self.stop_watch_person()
         self.stop_music()
         for svc in (self.motors, self.rgb):
@@ -2491,14 +2513,81 @@ class LocalLamp:
             return
         self.motors.dispatch("play", recording)
 
-    def _apply_rgb(self, rgb: Tuple[int, int, int]) -> None:
+    def _apply_rgb(
+        self,
+        rgb: Tuple[int, int, int],
+        *,
+        fade: Optional[bool] = None,
+        background: bool = False,
+    ) -> None:
+        """Set mood color. Fade up from black so the ring does not pop on."""
+        self._join_light_fade()
         self.base_rgb = rgb
         scaled = _scale_rgb(rgb, self.brightness)
-        self.last_rgb = scaled
-        if self.sim or self.rgb is None:
-            print(f"[sim] rgb {scaled} brightness={self.brightness}")
+        from_dark = sum(self.last_rgb) <= 18 and sum(scaled) > 30
+        use_fade = bool(fade) if fade is not None else from_dark
+        if use_fade and self.last_rgb != scaled:
+            self._fade_scaled(self.last_rgb, scaled, background=background and not self.sim)
             return
-        self.rgb.dispatch("solid", scaled)
+        self._push_scaled(scaled, quiet=False)
+
+    def _push_scaled(self, scaled: Tuple[int, int, int], *, quiet: bool = True) -> None:
+        self.last_rgb = (int(scaled[0]), int(scaled[1]), int(scaled[2]))
+        if self.sim or self.rgb is None:
+            if not quiet:
+                print(f"[sim] rgb {self.last_rgb} brightness={self.brightness}")
+            return
+        self.rgb.dispatch("solid", self.last_rgb)
+
+    def _fade_scaled(
+        self,
+        start: Tuple[int, int, int],
+        end: Tuple[int, int, int],
+        *,
+        background: bool = False,
+    ) -> None:
+        """Ramp WS2812 frames. Never touches mpg123, ALSA, or servos."""
+        frames = fade_rgb_frames(start, end, WAKE_FADE_STEPS)
+        live = bool(self.rgb is not None and not self.sim)
+        dt = (WAKE_FADE_SECONDS / max(1, len(frames))) if live else 0.0
+
+        def _run() -> None:
+            for frame in frames:
+                if self._fade_stop.is_set():
+                    break
+                self._push_scaled(frame, quiet=True)
+                if dt > 0:
+                    time.sleep(dt)
+            if not self._fade_stop.is_set():
+                self._push_scaled(end, quiet=False)
+                print(
+                    f"灯环渐亮 {WAKE_FADE_SECONDS:.1f}s → rgb {end} brightness={self.brightness}%",
+                    flush=True,
+                )
+
+        self._fade_stop.clear()
+        if background and live:
+            self._fade_thread = threading.Thread(
+                target=_run,
+                daemon=True,
+                name="lelamp-rgb-fade",
+            )
+            self._fade_thread.start()
+            return
+        _run()
+
+    def _join_light_fade(self, timeout: float = WAKE_FADE_SECONDS + 0.5) -> None:
+        thread = self._fade_thread
+        if thread is None or thread is threading.current_thread():
+            return
+        thread.join(timeout=max(0.1, float(timeout)))
+        if not thread.is_alive():
+            self._fade_thread = None
+
+    def _stop_light_fade(self) -> None:
+        self._fade_stop.set()
+        self._join_light_fade(timeout=1.0)
+        self._fade_stop.clear()
 
     def _paint_rgb(self, rgb: Tuple[int, int, int], *, quiet: bool = False) -> None:
         """Push a color without treating it as the saved mood."""
@@ -2873,7 +2962,7 @@ class LocalLamp:
     def wake(self) -> None:
         mood, bri = circadian_mood()
         self.brightness = bri
-        self._apply_rgb(MOOD_RGB[mood])
+        self._apply_rgb(MOOD_RGB[mood], fade=True)
         self._play("wake_up")
         print(
             f"台灯醒了。现在 {mood} 光，亮度 {self.brightness}%。输入 help 看命令。",

@@ -249,9 +249,9 @@ def test_sim_wake_is_circadian_then_wake_up():
     orig_apply = lamp._apply_rgb
     orig_play = lamp._play
 
-    def apply(rgb):
+    def apply(rgb, **kwargs):
         order.append("rgb")
-        return orig_apply(rgb)
+        return orig_apply(rgb, **kwargs)
 
     def play(recording, **kwargs):
         order.append("play")
@@ -266,6 +266,37 @@ def test_sim_wake_is_circadian_then_wake_up():
     assert lamp.brightness == bri
     assert lamp.base_rgb == MOOD_RGB[mood]
     assert lamp.last_rgb == _scale_rgb(MOOD_RGB[mood], bri)
+
+
+def test_fade_rgb_frames_eases_up_from_black():
+    from plugins.lelamp.local_main import fade_rgb_frames
+
+    frames = fade_rgb_frames((0, 0, 0), (200, 100, 40), steps=8)
+    assert len(frames) == 8
+    assert frames[-1] == (200, 100, 40)
+    lumas = [sum(frame) for frame in frames]
+    assert lumas[0] < lumas[-1]
+    assert lumas == sorted(lumas)
+
+
+def test_sim_wake_fade_does_not_sleep(monkeypatch):
+    from plugins.lelamp import local_main
+    from plugins.lelamp.local_main import LocalLamp, _scale_rgb, circadian_mood, MOOD_RGB
+
+    slept: list[float] = []
+    monkeypatch.setattr(local_main.time, "sleep", lambda s: slept.append(s))
+    lamp = LocalLamp(
+        sim=True,
+        port="/dev/null",
+        lamp_id="lelamp",
+        led_count=64,
+        brightness=1,
+    )
+    lamp.wake()
+    mood, bri = circadian_mood()
+    assert slept == []
+    assert lamp.last_rgb == _scale_rgb(MOOD_RGB[mood], bri)
+    assert lamp.last_expression == "wake_up"
 
 
 def test_stdin_is_tty_skips_dev_null(monkeypatch):
