@@ -1,0 +1,14 @@
+name: lelamp
+version: 0.1.0
+description: "Expressive LeLamp control — motion recordings, RGB moods, and a conversational lamp personality. Defaults to a hardware-free sim backend; point hermes lelamp setup at a Pi to drive the real lamp."
+author: Keystone
+kind: standalone
+platforms:
+  - linux
+  - macos
+  - windows
+provides_tools:
+  - lelamp_express
+  - lelamp_light
+  - lelamp_status
+hooks: []

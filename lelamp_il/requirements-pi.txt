@@ -1,0 +1,10 @@
+# Raspberry Pi Zero 2W inference — 64-bit Raspberry Pi OS Lite only.
+# 32-bit OS has no usable onnxruntime wheel; flash the 64-bit Lite image.
+numpy>=1.26,<3
+pillow>=10,<12
+onnxruntime>=1.18,<2
+# Optional: camera — apt: python3-picamera2 (see enable_pi_camera.sh)
+# picamera2   # CSI camera on Raspberry Pi OS; do not pip install
+# opencv-python-headless>=4.8,<5
+# Optional: Feetech STS3215 bus (same stack as LeLamp runtime)
+# feetech-servo-sdk

@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+artifacts/
+data/
+*.pt
+*.onnx
+*.png
+.DS_Store

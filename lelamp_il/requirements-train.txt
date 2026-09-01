@@ -1,0 +1,8 @@
+# Laptop / Mac 训练（Python 3.10+）。不要在树莓派上 pip install 本文件。
+# torch 走官方 wheel（Apple Silicon 会带 MPS）。不要装 CUDA 版。
+
+numpy>=1.26,<3
+pillow>=10,<12
+torch>=2.2,<3
+onnx>=1.16,<2
+onnxruntime>=1.18,<2
