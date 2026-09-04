@@ -1,18 +1,21 @@
-# XL330 可转动驱动盘（假电机 STL）
+# XL330 假电机（两侧都能转）
 
-**不要合并进 Hermes。** 这只是把可下载的 3D 打印文件放到仓库里。
+**不要合并进 Hermes。** 只是方便下载 STL。
 
-## 打印这两件
+上一版只把输出端做成转盘，背面 idle 盘熔在壳体上。这一版拆成三件，左右都能转。
+
+## 打印这三件
 
 | 文件 | 用途 |
 |------|------|
-| `xl330_body_spin.stl` | 电机壳体 20×34×26 mm，已掏轴孔 |
-| `xl330_horn_spin.stl` | 驱动盘 + φ4 mm 轴，从输出端插入即可转动 |
+| `xl330_body_spin.stl` | 壳体，两侧都掏了轴孔 |
+| `xl330_horn_output.stl` | 输出端驱动盘 + φ4 mm 轴 |
+| `xl330_horn_idle.stl` | 背面 idle 盘 + φ4 mm 轴 |
 
 也可只下 `xl330-dummy.zip`。
 
-对照：`xl330_horn_official.stl`（官方驱动盘、无轴），`XL330_XC330.stp`（ROBOTIS 官方 STEP）。
+两根轴从两侧分别插入，中间不相连，所以两边都能独立转动。装到 U 形支架上之后，支架会把两边连成一起转。
 
-单位毫米。轴 φ4.0 / 孔 φ4.6。太松把盘打 101%，太紧打磨轴。
+轴 φ4.0 / 孔 φ4.6。太松把盘打 101%，太紧打磨轴。壳体 20×34 侧面贴床；两只盘圆面贴床、轴朝上。
 
-来源：https://www.robotis.com/service/download.php?no=1987
+对照：`xl330_horn_official.stl`、`xl330_horn_idle_official.stl`、`XL330_XC330.stp`。
