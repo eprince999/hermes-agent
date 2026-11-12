@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>按 B4 做出语言学习 App · 教学计划 + C2</title>
+<style>
+body{font-family:ui-sans-serif,system-ui,sans-serif;max-width:900px;margin:0 auto;padding:24px;line-height:1.55;color:#222}
+h1{font-size:1.5rem;margin:0 0 8px} h2{margin-top:1.8rem;border-bottom:2px solid #ddd;padding-bottom:6px}
+table{width:100%;border-collapse:collapse;margin:12px 0;font-size:14px}
+th,td{border:1px solid #ccc;padding:8px;vertical-align:top;text-align:left} th{background:#f3f4f6}
+.box{background:#eff6ff;border:1px solid #bfdbfe;padding:12px;border-radius:8px;margin:12px 0}
+.ok{background:#ecfdf5;border-color:#a7f3d0} .warn{background:#fffbeb;border-color:#fde68a}
+.meta{color:#555;font-size:14px} code{background:#f3f4f6;padding:1px 5px;border-radius:4px}
+</style>
+</head>
+<body>
+<h1>按 B4 做出语言学习 App（建造课）+ C2 Skill Book</h1>
+<p class="meta">重点：不是画 B4，而是照着已有 B4 把 App 做出来。技术：HTML+CSS+JS+localStorage</p>
+<div class="box"><strong>口令：</strong>打开 B4 → 指出今天做哪一步 → 写成代码 → 点一遍对照 → 记 C2 证据</div>
+
+<h2>B4 → 代码映射</h2>
+<table>
+<tr><th>B4</th><th>建造时干什么</th><th>代码里要有</th></tr>
+<tr><td>User Flow</td><td>决定跳转与分支</td><td>所有屏幕跳转、完成/失败路径</td></tr>
+<tr><td>Wireframes</td><td>决定布局与组件</td><td>HTML/CSS 按线框摆放</td></tr>
+<tr><td>Data Structure</td><td>决定字段</td><td>JS 对象 + localStorage</td></tr>
+<tr><td>Architecture</td><td>决定文件分工</td><td>html/css/js/data/assets</td></tr>
+</table>
+
+<h2>五周建造计划</h2>
+<table>
+<tr><th>周</th><th>目标</th><th>学什么</th><th>验收</th></tr>
+<tr><td>W1</td><td>规划变屏幕</td><td>多屏壳+导航</td><td>能切换屏幕</td></tr>
+<tr><td>W2</td><td>塞进内容</td><td>数组/JSON 渲染</td><td>首页是自己的内容</td></tr>
+<tr><td>W3</td><td>练习可玩</td><td>步骤、判题、反馈</td><td>选课→结果全跑通</td></tr>
+<tr><td>W4</td><td>保存进度</td><td>localStorage、解锁</td><td>刷新续学</td></tr>
+<tr><td>W5</td><td>打磨交付</td><td>按 Flow 走查、演示</td><td>别人能玩</td></tr>
+</table>
+
+<h2>12 建造课</h2>
+<table>
+<tr><th>课</th><th>做什么</th><th>当堂能演示</th></tr>
+<tr><td>B1</td><td>把 Flow 拆成任务清单</td><td>Todolist：屏/按钮/数据</td></tr>
+<tr><td>B2</td><td>建 html/css/js 项目壳</td><td>3+ 空屏可切换</td></tr>
+<tr><td>B3</td><td>按 Flow 接导航</td><td>Skip→Hub 可走</td></tr>
+<tr><td>B4</td><td>按线框做 Hub</td><td>布局对齐线框</td></tr>
+<tr><td>B5</td><td>接入词表/课表数据</td><td>列表显示真实内容</td></tr>
+<tr><td>B6</td><td>练习 Step + Next/Back</td><td>能走完步骤</td></tr>
+<tr><td>B7</td><td>判题与对错反馈</td><td>错有提示、对可继续</td></tr>
+<tr><td>B8</td><td>完成页 + 回 Hub</td><td>Flow 闭环</td></tr>
+<tr><td>B9</td><td>localStorage 存进度</td><td>刷新不丢</td></tr>
+<tr><td>B10</td><td>锁定/解锁下一课</td><td>规则生效</td></tr>
+<tr><td>B11</td><td>用自己的 Flow 走查</td><td>修断点</td></tr>
+<tr><td>B12</td><td>演示与提交</td><td>可玩 App 定稿</td></tr>
+</table>
+
+<div class="warn box"><strong>必达：</strong>3 屏 + 1 课练习打通 + 存进度 + 回 Hub。<strong>先不要：</strong>服务器登录、数据库、社交。</div>
+
+<h2>文件结构</h2>
+<p><code>index.html</code> 各屏 · <code>style.css</code> 布局 · <code>app.js</code> 跳转/判题/存档 · <code>data.js</code> 词表 · <code>assets/</code> 素材</p>
+
+<h2>C2 Skill Book（做出 App 的技能）</h2>
+<p>每项写：对应 B4 哪部分 / 我做了什么 / 运行证据 / 自测</p>
+
+<h3>C2-A 从规划到代码</h3>
+<table>
+<tr><th>技能</th><th>过关标准</th><th>☐</th></tr>
+<tr><td>读懂自己的 Flow</td><td>能指着图说代码位置</td><td>☐</td></tr>
+<tr><td>线框→页面</td><td>主屏按线框实现</td><td>☐</td></tr>
+<tr><td>字段→变量</td><td>数据字段都有对应</td><td>☐</td></tr>
+<tr><td>架构→文件</td><td>项目职责清晰可运行</td><td>☐</td></tr>
+</table>
+
+<h3>C2-B 做出可玩 App</h3>
+<table>
+<tr><th>技能</th><th>过关标准</th><th>☐</th></tr>
+<tr><td>多屏切换</td><td>菜单可达各屏</td><td>☐</td></tr>
+<tr><td>列表渲染</td><td>加数据就多一项</td><td>☐</td></tr>
+<tr><td>练习状态机</td><td>一课完整打通</td><td>☐</td></tr>
+<tr><td>对错反馈</td><td>不卡死</td><td>☐</td></tr>
+<tr><td>完成回流</td><td>回 Hub 见新进度</td><td>☐</td></tr>
+<tr><td>持久化</td><td>刷新续学</td><td>☐</td></tr>
+<tr><td>解锁规则</td><td>与数据一致</td><td>☐</td></tr>
+</table>
+
+<h3>C2-C 语言学习功能</h3>
+<table>
+<tr><th>技能</th><th>过关标准</th><th>☐</th></tr>
+<tr><td>自有词表 ≥8</td><td>主题是自己的</td><td>☐</td></tr>
+<tr><td>至少两种题型</td><td>都能得分</td><td>☐</td></tr>
+<tr><td>学习闭环</td><td>符合自己的 Flow</td><td>☐</td></tr>
+<tr><td>鼓励反馈</td><td>适合孩子</td><td>☐</td></tr>
+</table>
+
+<h3>C2-D 调试与交付</h3>
+<table>
+<tr><th>技能</th><th>过关标准</th><th>☐</th></tr>
+<tr><td>按 Flow 走查</td><td>无死链</td><td>☐</td></tr>
+<tr><td>断点修复</td><td>能修自己的报错</td><td>☐</td></tr>
+<tr><td>演示就绪</td><td>他人能玩通主路径</td><td>☐</td></tr>
+<tr><td>代码可读</td><td>2 分钟内找到存档代码</td><td>☐</td></tr>
+</table>
+
+<p><strong>C2 最低线：</strong>勾选 ≥12；证据 ≥6；必须含：多屏、练习打通、localStorage、Flow 走查。</p>
+
+<div class="ok box">老师验收：拿学生的 B4，在 App 里逐项点——Flow 能走完、线框元素在、数据字段在用、项目能打开。</div>
+</body>
+</html>
